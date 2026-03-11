@@ -5,3 +5,7 @@ node_modules/
 .opencode/
 opencode.jsonc
 opencode.json
+.osgrep
+
+# opensrc - source code for packages
+opensrc/

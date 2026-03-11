@@ -15862,7 +15862,7 @@ function applyPrepend(edit, lines) {
   }
   return result;
 }
-async function applyHashlineEdits(filePath, edits) {
+async function applyHashlineEdits(filePath, edits, options) {
   let fileContent;
   try {
     fileContent = await Bun.file(filePath).text();
@@ -15904,13 +15904,147 @@ async function applyHashlineEdits(filePath, edits) {
   }
   const result = working.join(`
 `);
-  await mkdir(dirname(filePath), { recursive: true });
-  await Bun.write(filePath, result);
+  if (!options?.dryRun) {
+    await mkdir(dirname(filePath), { recursive: true });
+    await Bun.write(filePath, result);
+  }
   return {
     content: result,
     lineCountDelta: working.length - originalLineCount,
-    warnings
+    warnings,
+    originalLines: fileLines
   };
+}
+
+// src/lib/hashline-diff.ts
+function computeLCS(a, b) {
+  const m = a.length;
+  const n = b.length;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 1;i <= m; i++) {
+    for (let j = 1;j <= n; j++) {
+      if (a[i - 1] === b[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1] + 1;
+      } else {
+        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+      }
+    }
+  }
+  return dp;
+}
+function backtrack(dp, a, b) {
+  const changes = [];
+  let i = a.length;
+  let j = b.length;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && a[i - 1] === b[j - 1]) {
+      changes.unshift({ type: "equal", oldIndex: i - 1, newIndex: j - 1 });
+      i--;
+      j--;
+    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+      changes.unshift({ type: "insert", newIndex: j - 1 });
+      j--;
+    } else {
+      changes.unshift({ type: "delete", oldIndex: i - 1 });
+      i--;
+    }
+  }
+  return changes;
+}
+function buildHunks(changes, oldLines, newLines, contextLines) {
+  const changeIndices = [];
+  for (let i = 0;i < changes.length; i++) {
+    if (changes[i].type !== "equal") {
+      changeIndices.push(i);
+    }
+  }
+  if (changeIndices.length === 0)
+    return [];
+  const clusters = [];
+  let clusterStart = changeIndices[0];
+  let clusterEnd = changeIndices[0];
+  for (let i = 1;i < changeIndices.length; i++) {
+    const equalsBetween = changeIndices[i] - clusterEnd - 1;
+    if (equalsBetween > contextLines * 2) {
+      clusters.push({ start: clusterStart, end: clusterEnd });
+      clusterStart = changeIndices[i];
+    }
+    clusterEnd = changeIndices[i];
+  }
+  clusters.push({ start: clusterStart, end: clusterEnd });
+  const hunks = [];
+  for (const cluster of clusters) {
+    const hunkStart = Math.max(0, cluster.start - contextLines);
+    const hunkEnd = Math.min(changes.length - 1, cluster.end + contextLines);
+    const hunkChanges = changes.slice(hunkStart, hunkEnd + 1);
+    let oldStart = -1;
+    let newStart = -1;
+    for (const c of hunkChanges) {
+      if (oldStart === -1 && (c.type === "equal" || c.type === "delete")) {
+        oldStart = c.oldIndex + 1;
+      }
+      if (newStart === -1 && (c.type === "equal" || c.type === "insert")) {
+        newStart = c.newIndex + 1;
+      }
+      if (oldStart !== -1 && newStart !== -1)
+        break;
+    }
+    if (oldStart === -1)
+      oldStart = 0;
+    if (newStart === -1)
+      newStart = 0;
+    const lines = [];
+    let oldCount = 0;
+    let newCount = 0;
+    for (const c of hunkChanges) {
+      if (c.type === "equal") {
+        lines.push(" " + oldLines[c.oldIndex]);
+        oldCount++;
+        newCount++;
+      } else if (c.type === "delete") {
+        lines.push("-" + oldLines[c.oldIndex]);
+        oldCount++;
+      } else {
+        lines.push("+" + newLines[c.newIndex]);
+        newCount++;
+      }
+    }
+    hunks.push({ oldStart, oldCount, newStart, newCount, lines });
+  }
+  return hunks;
+}
+function formatRange(start, count) {
+  if (count === 0)
+    return `${start},0`;
+  if (count === 1)
+    return `${start}`;
+  return `${start},${count}`;
+}
+function buildUnifiedDiff(options) {
+  const { oldPath, newPath, oldLines, newLines, contextLines = 3 } = options;
+  if (oldLines.length === 0 && newLines.length === 0)
+    return "";
+  if (oldLines.length === newLines.length && oldLines.every((line, i) => line === newLines[i])) {
+    return "";
+  }
+  const dp = computeLCS(oldLines, newLines);
+  const changes = backtrack(dp, oldLines, newLines);
+  const hunks = buildHunks(changes, oldLines, newLines, contextLines);
+  if (hunks.length === 0)
+    return "";
+  const isCreation = oldLines.length === 0;
+  const isDeletion = newLines.length === 0;
+  const oldHeader = isCreation ? "--- /dev/null" : `--- a/${oldPath}`;
+  const newHeader = isDeletion ? "+++ /dev/null" : `+++ b/${newPath}`;
+  const parts = [oldHeader, newHeader];
+  for (const hunk of hunks) {
+    const oldRange = formatRange(hunk.oldStart, hunk.oldCount);
+    const newRange = formatRange(hunk.newStart, hunk.newCount);
+    parts.push(`@@ -${oldRange} +${newRange} @@`);
+    parts.push(...hunk.lines);
+  }
+  return parts.join(`
+`);
 }
 
 // src/lib/hashline-prompt.ts
@@ -15941,7 +16075,7 @@ function hlineref(n, content) {
 }
 var TOOL_DESCRIPTIONS = {
   hashline_read: "Read a file or directory with hashline annotations. Each line is formatted as LINE#HASH:content where HASH is a 2-character content hash. Use offset/limit for large files. For directories, returns a tree listing with line counts. Set diagnostics=true to include LSP diagnostics (errors/warnings) for the file.",
-  hashline_edit: 'Edit a file using hashline references. Operations: replace (single/range), append (after line), prepend (before line). Use "N#ID" anchors from hashline_read/hashline_grep output. Supports file creation (anchorless append), delete, and move. All hashes verified before mutation.',
+  hashline_edit: 'Edit a file using hashline references. Operations: replace (single/range), append (after line), prepend (before line). Use "N#ID" anchors from hashline_read/hashline_grep output. Supports file creation (anchorless append), delete, and move. All hashes verified before mutation. Set dryRun=true to preview changes as a unified diff without modifying any files.',
   hashline_grep: "Search files with hashline-annotated results. Returns matching lines with LINE#HASH:content format. Match lines prefixed with >. Context lines shown around matches. Results can be used directly for hashline_edit anchors."
 };
 function renderHashlineEditPrompt(lspDiagnosticsEnabled = false) {
@@ -17085,13 +17219,35 @@ ${formatted}${diagnosticsOutput}`;
             ]).optional().describe("New content lines")
           })).optional().describe("Array of edit operations"),
           delete: tool.schema.boolean().optional().describe("If true, delete the file"),
-          move: tool.schema.string().optional().describe("New path to move/rename the file to")
+          move: tool.schema.string().optional().describe("New path to move/rename the file to"),
+          dryRun: tool.schema.boolean().optional().describe("If true, preview changes as a unified diff without writing to disk")
         },
         async execute(args, context) {
           const editTitle = buildEditTitle(args);
           context.metadata({ title: editTitle });
           const resolvedPath = resolvePath(args.path, getBaseDir(context));
           if (args.delete) {
+            if (args.dryRun) {
+              let fileContent = "";
+              try {
+                fileContent = await Bun.file(resolvedPath).text();
+              } catch {
+                return `Error: Could not read file for dry-run: ${args.path}`;
+              }
+              const fileLines = fileContent.length === 0 ? [] : fileContent.split(`
+`);
+              const diff = buildUnifiedDiff({
+                oldPath: args.path,
+                newPath: args.path,
+                oldLines: fileLines,
+                newLines: []
+              });
+              return `Dry run \u2014 no changes written.
+
+Would delete file: ${args.path}
+
+${diff}`;
+            }
             try {
               await unlink(resolvedPath);
               return `Deleted file: ${args.path}`;
@@ -17101,11 +17257,15 @@ ${formatted}${diagnosticsOutput}`;
           }
           let lineCountDelta = 0;
           const warnings = [];
+          let originalLines = [];
+          let editedContent = "";
           if (args.edits && args.edits.length > 0) {
             try {
-              const result = await applyHashlineEdits(resolvedPath, args.edits);
+              const result = await applyHashlineEdits(resolvedPath, args.edits, { dryRun: !!args.dryRun });
               lineCountDelta = result.lineCountDelta;
               warnings.push(...result.warnings);
+              originalLines = result.originalLines;
+              editedContent = result.content;
             } catch (err) {
               if (err instanceof HashlineMismatchError) {
                 return err.message;
@@ -17117,6 +17277,33 @@ ${formatted}${diagnosticsOutput}`;
             }
           }
           if (args.move) {
+            if (args.dryRun) {
+              if (args.edits && args.edits.length > 0) {
+                const delta = lineCountDelta >= 0 ? `+${lineCountDelta}` : `${lineCountDelta}`;
+                const opSummary = summarizeEdits(args.edits);
+                const diff = buildUnifiedDiff({
+                  oldPath: args.path,
+                  newPath: args.move,
+                  oldLines: originalLines,
+                  newLines: editedContent.split(`
+`)
+                });
+                const warningStr = warnings.length > 0 ? `
+Warnings:
+${warnings.join(`
+`)}
+` : "";
+                return `Dry run for ${args.path} (${delta} lines), would move to ${args.move}
+${opSummary}${warningStr}
+
+No file changes written.
+
+${diff}`;
+              }
+              return `Dry run \u2014 no changes written.
+
+Would move file: ${args.path} \u2192 ${args.move}`;
+            }
             const resolvedNewPath = resolvePath(args.move, getBaseDir(context));
             try {
               const targetDir = resolvedNewPath.slice(0, resolvedNewPath.lastIndexOf("/"));
@@ -17157,6 +17344,26 @@ ${warnings.join(`
           if (args.edits && args.edits.length > 0) {
             const delta = lineCountDelta >= 0 ? `+${lineCountDelta}` : `${lineCountDelta}`;
             const opSummary = summarizeEdits(args.edits);
+            if (args.dryRun) {
+              const diff = buildUnifiedDiff({
+                oldPath: args.path,
+                newPath: args.path,
+                oldLines: originalLines,
+                newLines: editedContent.split(`
+`)
+              });
+              const warningStr = warnings.length > 0 ? `
+Warnings:
+${warnings.join(`
+`)}
+` : "";
+              return `Dry run for ${args.path} (${delta} lines)
+${opSummary}${warningStr}
+
+No file changes written.
+
+${diff}`;
+            }
             const msg = `Applied edits to ${args.path} (${delta} lines)
 ${opSummary}`;
             let diagnostics = "";
@@ -17252,5 +17459,5 @@ export {
   src_default as default
 };
 
-//# debugId=838D9154349E2A5264756E2164756E21
+//# debugId=BF8695BC03E0C83564756E2164756E21
 //# sourceMappingURL=index.js.map

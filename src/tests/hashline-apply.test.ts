@@ -250,3 +250,77 @@ describe("applyHashlineEdits — ordering & dedup", () => {
     expect(result.warnings[0]).toContain("No-op");
   });
 });
+
+
+// ─── DryRun Mode Tests ────────────────────────────────────────────────────────────
+
+describe("applyHashlineEdits — dryRun mode", () => {
+  it("does NOT write to disk when dryRun=true", async () => {
+    const originalContent = "line1\nline2\nline3";
+    const h = await setupFile(["line1", "line2", "line3"]);
+    await applyHashlineEdits(
+      testFile,
+      [{ op: "replace", pos: ref(2, h.get(2)!), lines: ["replaced"] }],
+      { dryRun: true },
+    );
+    // File should still have original content
+    const diskContent = await Bun.file(testFile).text();
+    expect(diskContent).toBe(originalContent);
+  });
+
+  it("returns correct content (what would be written) when dryRun=true", async () => {
+    const h = await setupFile(["line1", "line2", "line3"]);
+    const result = await applyHashlineEdits(
+      testFile,
+      [{ op: "replace", pos: ref(2, h.get(2)!), lines: ["replaced"] }],
+      { dryRun: true },
+    );
+    expect(result.content).toBe("line1\nreplaced\nline3");
+  });
+
+  it("returns originalLines matching pre-edit file content when dryRun=true", async () => {
+    const h = await setupFile(["line1", "line2", "line3"]);
+    const result = await applyHashlineEdits(
+      testFile,
+      [{ op: "replace", pos: ref(2, h.get(2)!), lines: ["replaced"] }],
+      { dryRun: true },
+    );
+    expect(result.originalLines).toEqual(["line1", "line2", "line3"]);
+  });
+
+  it("does NOT create a new file when dryRun=true with anchorless append", async () => {
+    const { join } = await import("path");
+    const newFile = join(tmpDir, "dry-run-new.ts");
+    await applyHashlineEdits(
+      newFile,
+      [{ op: "append", lines: ["first", "second"] }],
+      { dryRun: true },
+    );
+    // File must NOT exist after dry-run
+    let exists = false;
+    try {
+      await Bun.file(newFile).text();
+      exists = true;
+    } catch {
+      exists = false;
+    }
+    expect(exists).toBe(false);
+  });
+
+  it("lineCountDelta and warnings match normal apply when dryRun=true", async () => {
+    const h = await setupFile(["line1", "line2", "line3"]);
+    // No-op edit — should produce warning in both modes
+    const dryResult = await applyHashlineEdits(
+      testFile,
+      [{ op: "replace", pos: ref(2, h.get(2)!), lines: ["line2"] }],
+      { dryRun: true },
+    );
+    // Re-read hashes (file unchanged in dryRun)
+    const h2 = await setupFile(["line1", "line2", "line3"]);
+    const liveResult = await applyHashlineEdits(testFile, [
+      { op: "replace", pos: ref(2, h2.get(2)!), lines: ["line2"] },
+    ]);
+    expect(dryResult.lineCountDelta).toBe(liveResult.lineCountDelta);
+    expect(dryResult.warnings).toEqual(liveResult.warnings);
+  });
+});
