@@ -37,5 +37,5 @@ export declare const TOOL_DESCRIPTIONS: {
  * All hash examples are computed at runtime via computeLineHash(),
  * so they always match the actual algorithm output.
  */
-export declare function renderHashlineEditPrompt(): string;
+export declare function renderHashlineEditPrompt(lspDiagnosticsEnabled?: boolean): string;
 //# sourceMappingURL=hashline-prompt.d.ts.map

@@ -22,7 +22,6 @@ import { resolve, isAbsolute, relative } from "path";
 import { readdir, stat, unlink, rename, mkdir } from "fs/promises";
 import { collectAndFormatDiagnostics } from "./lib/lsp/lsp-diagnostics";
 import { LspManager } from "./lib/lsp/lsp-manager";
-import type { LspConfig } from "./lib/lsp/types";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -96,6 +95,9 @@ function getBaseDir(context: { directory: string; worktree: string }): string {
 const LSP_DIAGNOSTICS_ENABLED =
   process.env.EXPERIMENTAL_LSP_DIAGNOSTICS === "true";
 
+
+/** Track whether we have already notified about missing LSP servers. */
+let hasNotifiedMissingServers = false;
 
 /**
  * Summarize edit operations for the response message.
@@ -437,14 +439,9 @@ const plugin: Plugin = async (ctx) => {
   if (LSP_DIAGNOSTICS_ENABLED) {
     const baseDir = ctx.directory || ctx.worktree;
     try {
-      const configPath = resolve(baseDir, "opencode.json");
-      const raw = await Bun.file(configPath).text();
-      const parsed = JSON.parse(raw) as Record<string, unknown>;
-      if (parsed.lsp) {
-        LspManager.configure(parsed.lsp as LspConfig, baseDir);
-      }
+      await LspManager.autoConfigure(baseDir);
     } catch {
-      // opencode.json not found or invalid — skip LSP diagnostics
+      // Auto-detection failed — skip LSP diagnostics
     }
   }
 
@@ -645,6 +642,17 @@ const plugin: Plugin = async (ctx) => {
                     diagnostics = await collectAndFormatDiagnostics(resolvedNewPath, getBaseDir(context));
                   } catch { /* LSP failure must never block edit */ }
                 }
+                // Notify about missing LSP servers on first edit
+                if (LSP_DIAGNOSTICS_ENABLED && !hasNotifiedMissingServers) {
+                  hasNotifiedMissingServers = true;
+                  const detection = LspManager.getDetectionResult();
+                  if (detection && detection.missing.length > 0) {
+                    const missingList = detection.missing
+                      .map(m => `${m.language} (${m.server} not found — ${m.installHint})`)
+                      .join(", ");
+                    diagnostics += `\n\nLSP diagnostics unavailable for: ${missingList}`;
+                  }
+                }
                 if (warnings.length > 0) {
                   return `${msg}\nWarnings:\n${warnings.join("\n")}${diagnostics}`;
                 }
@@ -669,6 +677,17 @@ const plugin: Plugin = async (ctx) => {
               try {
                 diagnostics = await collectAndFormatDiagnostics(resolvedPath, getBaseDir(context));
               } catch { /* LSP failure must never block edit */ }
+            }
+            // Notify about missing LSP servers on first edit
+            if (LSP_DIAGNOSTICS_ENABLED && !hasNotifiedMissingServers) {
+              hasNotifiedMissingServers = true;
+              const detection = LspManager.getDetectionResult();
+              if (detection && detection.missing.length > 0) {
+                const missingList = detection.missing
+                  .map(m => `${m.language} (${m.server} not found — ${m.installHint})`)
+                  .join(", ");
+                diagnostics += `\n\nLSP diagnostics unavailable for: ${missingList}`;
+              }
             }
             if (warnings.length > 0) {
               return `${msg}\nWarnings:\n${warnings.join("\n")}${diagnostics}`;

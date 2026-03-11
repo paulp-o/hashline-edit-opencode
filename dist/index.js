@@ -16129,7 +16129,7 @@ When \`hashline_edit\` modifies a file, LSP diagnostics (errors, warnings) are a
 
 // src/index.ts
 import { resolve, isAbsolute as isAbsolute2, relative as relative2 } from "path";
-import { readdir, stat, unlink, rename, mkdir as mkdir2 } from "fs/promises";
+import { readdir as readdir2, stat, unlink, rename, mkdir as mkdir2 } from "fs/promises";
 
 // src/lib/lsp/lsp-client.ts
 var import_node = __toESM(require_main(), 1);
@@ -16172,6 +16172,29 @@ var EXTENSION_LANGUAGE_MAP = {
   ".yml": "yaml",
   ".toml": "toml",
   ".md": "markdown"
+};
+var LSP_REGISTRY = {
+  typescript: { command: ["typescript-language-server", "--stdio"], extensions: [".ts", ".tsx", ".mjs", ".cjs", ".js", ".jsx"] },
+  python: { command: ["pyright-langserver", "--stdio"], extensions: [".py", ".pyi"] },
+  rust: { command: ["rust-analyzer"], extensions: [".rs"] },
+  go: { command: ["gopls"], extensions: [".go"] },
+  "c-cpp": { command: ["clangd"], extensions: [".c", ".cpp", ".cc", ".cxx", ".h", ".hpp"] },
+  java: { command: ["jdtls"], extensions: [".java"] },
+  ruby: { command: ["ruby-lsp"], extensions: [".rb", ".erb"] },
+  php: { command: ["intelephense", "--stdio"], extensions: [".php"] },
+  csharp: { command: ["csharp-ls"], extensions: [".cs"] },
+  swift: { command: ["sourcekit-lsp"], extensions: [".swift"] },
+  kotlin: { command: ["kotlin-language-server"], extensions: [".kt", ".kts"] },
+  scala: { command: ["metals"], extensions: [".scala", ".sbt"] },
+  zig: { command: ["zls"], extensions: [".zig"] },
+  vue: { command: ["vue-language-server", "--stdio"], extensions: [".vue"] },
+  svelte: { command: ["svelteserver", "--stdio"], extensions: [".svelte"] },
+  lua: { command: ["lua-language-server"], extensions: [".lua"] },
+  yaml: { command: ["yaml-language-server", "--stdio"], extensions: [".yaml", ".yml"] },
+  css: { command: ["vscode-css-language-server", "--stdio"], extensions: [".css", ".scss", ".sass", ".less"] },
+  html: { command: ["vscode-html-language-server", "--stdio"], extensions: [".html", ".htm"] },
+  json: { command: ["vscode-json-language-server", "--stdio"], extensions: [".json", ".jsonc"] },
+  toml: { command: ["taplo", "lsp", "stdio"], extensions: [".toml"] }
 };
 function getLanguageId(filePath) {
   const ext = filePath.slice(filePath.lastIndexOf(".")).toLowerCase();
@@ -16384,7 +16407,49 @@ class LspClient {
 }
 
 // src/lib/lsp/lsp-manager.ts
-import { extname } from "path";
+import { extname, join } from "path";
+import { readdir } from "fs/promises";
+var {$ } = globalThis.Bun;
+var EXCLUDED_DIRS = new Set([
+  "node_modules",
+  ".git",
+  "dist",
+  "build",
+  ".next",
+  "out",
+  "coverage",
+  "__pycache__",
+  ".venv",
+  "venv",
+  ".tox",
+  "target",
+  ".idea",
+  ".vscode"
+]);
+var SCAN_SUBDIRS = ["src", "lib", "app", "pages", "components", "packages"];
+var INSTALL_HINTS = {
+  typescript: "npm install -g typescript-language-server typescript",
+  python: "pip install pyright",
+  rust: "rustup component add rust-analyzer",
+  go: "go install golang.org/x/tools/gopls@latest",
+  "c-cpp": "apt install clangd (Linux) / brew install llvm (macOS)",
+  java: "See https://github.com/eclipse-jdtls/eclipse.jdt.ls",
+  ruby: "gem install ruby-lsp",
+  php: "npm install -g intelephense",
+  csharp: "dotnet tool install -g csharp-ls",
+  swift: "Included with Xcode",
+  kotlin: "See https://github.com/fwcd/kotlin-language-server",
+  scala: "See https://scalameta.org/metals/docs/editors/new-editor",
+  zig: "See https://github.com/zigtools/zls",
+  vue: "npm install -g @vue/language-server",
+  svelte: "npm install -g svelte-language-server",
+  lua: "See https://github.com/LuaLS/lua-language-server",
+  yaml: "npm install -g yaml-language-server",
+  css: "npm install -g vscode-langservers-extracted",
+  html: "npm install -g vscode-langservers-extracted",
+  json: "npm install -g vscode-langservers-extracted",
+  toml: "cargo install taplo-cli"
+};
 
 class LspManager {
   static instance = null;
@@ -16392,7 +16457,128 @@ class LspManager {
   rootPath = "";
   clients = new Map;
   extensionToServer = new Map;
+  detectionResult;
   constructor() {}
+  async scanProjectFiles(projectRoot) {
+    const extensions = new Set;
+    try {
+      const result = await $`git ls-files`.cwd(projectRoot).text();
+      const files = result.trim().split(`
+`).filter(Boolean);
+      for (const file2 of files) {
+        const ext = extname(file2).toLowerCase();
+        if (ext)
+          extensions.add(ext);
+      }
+      if (extensions.size > 0)
+        return extensions;
+    } catch {}
+    await this.scanDirectory(projectRoot, extensions, false);
+    for (const subdir of SCAN_SUBDIRS) {
+      const subdirPath = join(projectRoot, subdir);
+      try {
+        await this.scanDirectory(subdirPath, extensions, false);
+      } catch {}
+    }
+    try {
+      const packagesDir = join(projectRoot, "packages");
+      const packageEntries = await readdir(packagesDir, {
+        withFileTypes: true
+      });
+      for (const entry of packageEntries) {
+        if (entry.isDirectory() && !EXCLUDED_DIRS.has(entry.name)) {
+          const pkgPath = join(packagesDir, entry.name);
+          await this.scanDirectory(pkgPath, extensions, false);
+          try {
+            await this.scanDirectory(join(pkgPath, "src"), extensions, false);
+          } catch {}
+        }
+      }
+    } catch {}
+    return extensions;
+  }
+  async scanDirectory(dirPath, extensions, _recursive) {
+    const entries = await readdir(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory())
+        continue;
+      if (EXCLUDED_DIRS.has(entry.name))
+        continue;
+      const ext = extname(entry.name).toLowerCase();
+      if (ext)
+        extensions.add(ext);
+    }
+  }
+  async checkServerAvailability(detectedExtensions) {
+    const candidates = [];
+    for (const [language, serverInfo] of Object.entries(LSP_REGISTRY)) {
+      const hasMatchingExtension = serverInfo.extensions.some((ext) => detectedExtensions.has(ext));
+      if (hasMatchingExtension) {
+        candidates.push({ language, serverInfo });
+      }
+    }
+    const results = await Promise.all(candidates.map(async (candidate) => {
+      const command = candidate.serverInfo.command[0];
+      const path = Bun.which(command);
+      return { ...candidate, inPath: path !== null };
+    }));
+    const available = results.filter((r) => r.inPath).map(({ language, serverInfo }) => ({ language, serverInfo }));
+    const missing = results.filter((r) => !r.inPath).map(({ language, serverInfo }) => ({ language, serverInfo }));
+    return { available, missing };
+  }
+  static async autoConfigure(projectRoot) {
+    if (!LspManager.instance) {
+      LspManager.instance = new LspManager;
+    }
+    const mgr = LspManager.instance;
+    mgr.rootPath = projectRoot;
+    mgr.config = {};
+    mgr.extensionToServer.clear();
+    const detectedExtensions = await mgr.scanProjectFiles(projectRoot);
+    const { available, missing } = await mgr.checkServerAvailability(detectedExtensions);
+    for (const { language, serverInfo } of available) {
+      const serverConfig = {
+        command: serverInfo.command,
+        extensions: serverInfo.extensions
+      };
+      mgr.config[language] = serverConfig;
+      for (const ext of serverInfo.extensions) {
+        const normalizedExt = ext.startsWith(".") ? ext : `.${ext}`;
+        mgr.extensionToServer.set(normalizedExt, language);
+      }
+    }
+    const detected = [];
+    const startPromises = available.map(async ({ language, serverInfo }) => {
+      const representativeExt = serverInfo.extensions[0];
+      const fakePath = `__lsp_probe__${representativeExt}`;
+      try {
+        const client = await LspManager.getClientForFile(fakePath);
+        detected.push({
+          language,
+          server: serverInfo.command[0],
+          started: client !== null
+        });
+      } catch {
+        detected.push({
+          language,
+          server: serverInfo.command[0],
+          started: false
+        });
+      }
+    });
+    await Promise.all(startPromises);
+    const missingResult = missing.map(({ language, serverInfo }) => ({
+      language,
+      server: serverInfo.command[0],
+      installHint: INSTALL_HINTS[language] ?? `Install ${serverInfo.command[0]}`
+    }));
+    const result = {
+      detected,
+      missing: missingResult
+    };
+    mgr.detectionResult = result;
+    return result;
+  }
   static configure(config2, rootPath) {
     if (!LspManager.instance) {
       LspManager.instance = new LspManager;
@@ -16415,6 +16601,9 @@ class LspManager {
   }
   static isConfigured() {
     return LspManager.instance !== null && Object.keys(LspManager.instance.config).length > 0;
+  }
+  static getDetectionResult() {
+    return LspManager.instance?.detectionResult;
   }
   static async getClientForFile(filePath) {
     const mgr = LspManager.instance;
@@ -16461,6 +16650,9 @@ class LspManager {
   }
   static async reset() {
     await LspManager.stopAll();
+    if (LspManager.instance) {
+      LspManager.instance.detectionResult = undefined;
+    }
     LspManager.instance = null;
   }
 }
@@ -16600,6 +16792,7 @@ function getBaseDir(context) {
   return context.directory || context.worktree;
 }
 var LSP_DIAGNOSTICS_ENABLED = process.env.EXPERIMENTAL_LSP_DIAGNOSTICS === "true";
+var hasNotifiedMissingServers = false;
 function summarizeEdits(edits) {
   const lines = [];
   for (const edit of edits) {
@@ -16649,7 +16842,7 @@ function buildEditTitle(args) {
   return parts.join(" \u2014 ");
 }
 async function buildDirectoryListing(dirPath, basePath, indent = "") {
-  const entries = await readdir(dirPath, { withFileTypes: true });
+  const entries = await readdir2(dirPath, { withFileTypes: true });
   entries.sort((a, b) => {
     if (a.isDirectory() && !b.isDirectory())
       return -1;
@@ -16748,7 +16941,7 @@ function formatGrepResults(matches) {
 `);
 }
 async function* walkDirectory(dir, includePattern) {
-  const entries = await readdir(dir, { withFileTypes: true });
+  const entries = await readdir2(dir, { withFileTypes: true });
   for (const entry of entries) {
     if (entry.name.startsWith(".") || entry.name === "node_modules")
       continue;
@@ -16806,16 +16999,11 @@ async function fsBasedSearch(pattern, searchPath, include, contextLines = 2) {
   return allMatches;
 }
 var plugin = async (ctx) => {
-  const { $ } = ctx;
+  const { $: $2 } = ctx;
   if (LSP_DIAGNOSTICS_ENABLED) {
     const baseDir = ctx.directory || ctx.worktree;
     try {
-      const configPath = resolve(baseDir, "opencode.json");
-      const raw = await Bun.file(configPath).text();
-      const parsed = JSON.parse(raw);
-      if (parsed.lsp) {
-        LspManager.configure(parsed.lsp, baseDir);
-      }
+      await LspManager.autoConfigure(baseDir);
     } catch {}
   }
   return {
@@ -16936,6 +17124,16 @@ ${formatted}`;
                     diagnostics = await collectAndFormatDiagnostics(resolvedNewPath, getBaseDir(context));
                   } catch {}
                 }
+                if (LSP_DIAGNOSTICS_ENABLED && !hasNotifiedMissingServers) {
+                  hasNotifiedMissingServers = true;
+                  const detection = LspManager.getDetectionResult();
+                  if (detection && detection.missing.length > 0) {
+                    const missingList = detection.missing.map((m) => `${m.language} (${m.server} not found \u2014 ${m.installHint})`).join(", ");
+                    diagnostics += `
+
+LSP diagnostics unavailable for: ${missingList}`;
+                  }
+                }
                 if (warnings.length > 0) {
                   return `${msg}
 Warnings:
@@ -16959,6 +17157,16 @@ ${opSummary}`;
               try {
                 diagnostics = await collectAndFormatDiagnostics(resolvedPath, getBaseDir(context));
               } catch {}
+            }
+            if (LSP_DIAGNOSTICS_ENABLED && !hasNotifiedMissingServers) {
+              hasNotifiedMissingServers = true;
+              const detection = LspManager.getDetectionResult();
+              if (detection && detection.missing.length > 0) {
+                const missingList = detection.missing.map((m) => `${m.language} (${m.server} not found \u2014 ${m.installHint})`).join(", ");
+                diagnostics += `
+
+LSP diagnostics unavailable for: ${missingList}`;
+              }
             }
             if (warnings.length > 0) {
               return `${msg}
@@ -16992,7 +17200,7 @@ ${warnings.join(`
             if (args.include) {
               rgArgs.push("--glob", args.include);
             }
-            const result = await $`rg ${rgArgs} ${args.pattern} ${searchPath}`.nothrow().quiet().text();
+            const result = await $2`rg ${rgArgs} ${args.pattern} ${searchPath}`.nothrow().quiet().text();
             if (result.trim().length === 0) {
               return `No matches found for pattern: ${args.pattern}`;
             }
@@ -17037,5 +17245,5 @@ export {
   src_default as default
 };
 
-//# debugId=92EDC62A5A7D754B64756E2164756E21
+//# debugId=EA4B08AB5F6F661C64756E2164756E21
 //# sourceMappingURL=index.js.map

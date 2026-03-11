@@ -1,6 +1,6 @@
 {
   "name": "@paulp-o/hashline-edit-opencode",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "HashLine Edit plugin for OpenCode AI - precision line editing with content hashes",
   "type": "module",
   "main": "./dist/index.js",
@@ -35,7 +35,8 @@
     "url": "https://github.com/paulp-o/hashline-edit-opencode/issues"
   },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1.0.0"

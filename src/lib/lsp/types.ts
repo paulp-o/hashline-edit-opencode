@@ -14,6 +14,20 @@ export interface LspServerConfig {
 
 export type LspConfig = Record<string, { disabled: true } | LspServerConfig>;
 
+// ─── Auto-detection types ─────────────────────────────────────────────────────
+
+/** Info for an auto-detectable LSP server */
+export interface LspServerInfo {
+  command: string[];      // Command + args to spawn (e.g., ["pyright-langserver", "--stdio"])
+  extensions: string[];   // File extensions this server handles (e.g., [".py", ".pyi"])
+}
+
+/** Result of automatic LSP server detection */
+export interface LspDetectionResult {
+  detected: Array<{ language: string; server: string; started: boolean }>;
+  missing: Array<{ language: string; server: string; installHint: string }>;
+}
+
 // ─── Diagnostic types ────────────────────────────────────────────────────────
 
 export type DiagnosticSeverity = "ERROR" | "WARN" | "INFO" | "HINT";
@@ -72,6 +86,31 @@ export const EXTENSION_LANGUAGE_MAP: Record<string, string> = {
   ".yml": "yaml",
   ".toml": "toml",
   ".md": "markdown",
+};
+
+/** Built-in registry of known LSP servers for auto-detection */
+export const LSP_REGISTRY: Record<string, LspServerInfo> = {
+  typescript: { command: ["typescript-language-server", "--stdio"], extensions: [".ts", ".tsx", ".mjs", ".cjs", ".js", ".jsx"] },
+  python: { command: ["pyright-langserver", "--stdio"], extensions: [".py", ".pyi"] },
+  rust: { command: ["rust-analyzer"], extensions: [".rs"] },
+  go: { command: ["gopls"], extensions: [".go"] },
+  "c-cpp": { command: ["clangd"], extensions: [".c", ".cpp", ".cc", ".cxx", ".h", ".hpp"] },
+  java: { command: ["jdtls"], extensions: [".java"] },
+  ruby: { command: ["ruby-lsp"], extensions: [".rb", ".erb"] },
+  php: { command: ["intelephense", "--stdio"], extensions: [".php"] },
+  csharp: { command: ["csharp-ls"], extensions: [".cs"] },
+  swift: { command: ["sourcekit-lsp"], extensions: [".swift"] },
+  kotlin: { command: ["kotlin-language-server"], extensions: [".kt", ".kts"] },
+  scala: { command: ["metals"], extensions: [".scala", ".sbt"] },
+  zig: { command: ["zls"], extensions: [".zig"] },
+  vue: { command: ["vue-language-server", "--stdio"], extensions: [".vue"] },
+  svelte: { command: ["svelteserver", "--stdio"], extensions: [".svelte"] },
+  lua: { command: ["lua-language-server"], extensions: [".lua"] },
+  yaml: { command: ["yaml-language-server", "--stdio"], extensions: [".yaml", ".yml"] },
+  css: { command: ["vscode-css-language-server", "--stdio"], extensions: [".css", ".scss", ".sass", ".less"] },
+  html: { command: ["vscode-html-language-server", "--stdio"], extensions: [".html", ".htm"] },
+  json: { command: ["vscode-json-language-server", "--stdio"], extensions: [".json", ".jsonc"] },
+  toml: { command: ["taplo", "lsp", "stdio"], extensions: [".toml"] },
 };
 
 /** Get language ID for a file path, defaults to the extension without the dot */
