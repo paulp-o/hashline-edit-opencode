@@ -15940,7 +15940,7 @@ function hlineref(n, content) {
   return `"${n}#${hash2}"`;
 }
 var TOOL_DESCRIPTIONS = {
-  hashline_read: "Read a file or directory with hashline annotations. Each line is formatted as LINE#HASH:content where HASH is a 2-character content hash. Use offset/limit for large files. For directories, returns a tree listing with line counts.",
+  hashline_read: "Read a file or directory with hashline annotations. Each line is formatted as LINE#HASH:content where HASH is a 2-character content hash. Use offset/limit for large files. For directories, returns a tree listing with line counts. Set diagnostics=true to include LSP diagnostics (errors/warnings) for the file.",
   hashline_edit: 'Edit a file using hashline references. Operations: replace (single/range), append (after line), prepend (before line). Use "N#ID" anchors from hashline_read/hashline_grep output. Supports file creation (anchorless append), delete, and move. All hashes verified before mutation.',
   hashline_grep: "Search files with hashline-annotated results. Returns matching lines with LINE#HASH:content format. Match lines prefixed with >. Context lines shown around matches. Results can be used directly for hashline_edit anchors."
 };
@@ -17013,7 +17013,8 @@ var plugin = async (ctx) => {
         args: {
           filePath: tool.schema.string().describe("Path to a file or directory to read"),
           offset: tool.schema.number().optional().describe("Starting line number (1-indexed, default 1)"),
-          limit: tool.schema.number().optional().describe("Maximum number of lines to return (default 2000)")
+          limit: tool.schema.number().optional().describe("Maximum number of lines to return (default 2000)"),
+          diagnostics: tool.schema.boolean().optional().describe("If true, append LSP diagnostics for the file (default: false)")
         },
         async execute(args, context) {
           const resolvedPath = resolvePath(args.filePath, getBaseDir(context));
@@ -17054,13 +17055,19 @@ var plugin = async (ctx) => {
           const truncated = sliced.map((line) => line.length > 2000 ? line.slice(0, 2000) + "... [truncated]" : line);
           const formatted = formatHashLines(truncated.join(`
 `), startIdx + 1);
+          let diagnosticsOutput = "";
+          if (args.diagnostics && LSP_DIAGNOSTICS_ENABLED) {
+            try {
+              diagnosticsOutput = await collectAndFormatDiagnostics(resolvedPath, getBaseDir(context));
+            } catch {}
+          }
           const showingStart = startIdx + 1;
           const showingEnd = startIdx + sliced.length;
           if (totalLines > limit || offset > 1) {
             return `(showing lines ${showingStart}-${showingEnd} of ${totalLines} total)
-${formatted}`;
+${formatted}${diagnosticsOutput}`;
           }
-          return formatted;
+          return formatted + diagnosticsOutput;
         }
       }),
       hashline_edit: tool({
@@ -17245,5 +17252,5 @@ export {
   src_default as default
 };
 
-//# debugId=EA4B08AB5F6F661C64756E2164756E21
+//# debugId=838D9154349E2A5264756E2164756E21
 //# sourceMappingURL=index.js.map

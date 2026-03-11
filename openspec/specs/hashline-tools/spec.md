@@ -7,6 +7,7 @@ Parameters:
 - `filePath` (required string): path to file or directory
 - `offset` (optional number, 1-indexed): starting line number
 - `limit` (optional number, default 2000): maximum lines to return
+- `diagnostics` (optional boolean, default false): include LSP diagnostics in output
 
 Output: each line formatted as `LINE#HASH:content`
 
@@ -44,6 +45,13 @@ Output: each line formatted as `LINE#HASH:content`
 - **WHEN** calling hashline_read with a non-existent filePath
 - **THEN** a helpful error message SHALL be returned
 - **AND** the error SHALL indicate file not found
+
+#### Scenario: Read with diagnostics
+- **WHEN** calling hashline_read with filePath="src/app.ts", diagnostics=true
+- **AND** LSP diagnostics feature is enabled
+- **THEN** the hashline-annotated content SHALL be returned
+- **AND** LSP diagnostics (errors/warnings) for the file SHALL be appended to the output
+- **AND** diagnostics SHALL be formatted in XML format matching hashline_edit output
 
 ### Requirement: hashline_edit Tool
 The system SHALL provide a tool to edit files using hashline references.

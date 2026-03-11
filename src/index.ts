@@ -462,6 +462,10 @@ const plugin: Plugin = async (ctx) => {
             .number()
             .optional()
             .describe("Maximum number of lines to return (default 2000)"),
+          diagnostics: tool.schema
+            .boolean()
+            .optional()
+            .describe("If true, append LSP diagnostics for the file (default: false)"),
         },
         async execute(args, context) {
           const resolvedPath = resolvePath(args.filePath, getBaseDir(context));
@@ -526,14 +530,22 @@ const plugin: Plugin = async (ctx) => {
           // Format with hashline annotations
           const formatted = formatHashLines(truncated.join("\n"), startIdx + 1);
 
+          // Collect LSP diagnostics if requested
+          let diagnosticsOutput = "";
+          if (args.diagnostics && LSP_DIAGNOSTICS_ENABLED) {
+            try {
+              diagnosticsOutput = await collectAndFormatDiagnostics(resolvedPath, getBaseDir(context));
+            } catch { /* LSP failure must never block read */ }
+          }
+
           // Add header if file exceeds limit
           const showingStart = startIdx + 1;
           const showingEnd = startIdx + sliced.length;
           if (totalLines > limit || offset > 1) {
-            return `(showing lines ${showingStart}-${showingEnd} of ${totalLines} total)\n${formatted}`;
+            return `(showing lines ${showingStart}-${showingEnd} of ${totalLines} total)\n${formatted}${diagnosticsOutput}`;
           }
 
-          return formatted;
+          return formatted + diagnosticsOutput;
         },
       }),
 

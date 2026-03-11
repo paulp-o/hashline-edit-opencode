@@ -63,7 +63,7 @@ export function hlineref(n: number, content: string): string {
 
 export const TOOL_DESCRIPTIONS = {
   hashline_read:
-    "Read a file or directory with hashline annotations. Each line is formatted as LINE#HASH:content where HASH is a 2-character content hash. Use offset/limit for large files. For directories, returns a tree listing with line counts.",
+    "Read a file or directory with hashline annotations. Each line is formatted as LINE#HASH:content where HASH is a 2-character content hash. Use offset/limit for large files. For directories, returns a tree listing with line counts. Set diagnostics=true to include LSP diagnostics (errors/warnings) for the file.",
   hashline_edit:
     "Edit a file using hashline references. Operations: replace (single/range), append (after line), prepend (before line). Use \"N#ID\" anchors from hashline_read/hashline_grep output. Supports file creation (anchorless append), delete, and move. All hashes verified before mutation.",
   hashline_grep:
