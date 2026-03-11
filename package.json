@@ -53,8 +53,8 @@
     "build:types": "tsc --emitDeclarationOnly",
     "build:all": "rm -rf dist && bun run build && bun run build:types",
     "clean": "rm -rf dist",
-    "test": "bun test",
+    "test": "bun test src/tests/",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "bun run build:all && bun run typecheck && bun test"
+    "prepublishOnly": "bun run build:all && bun run typecheck && bun test src/tests/"
   }
 }
