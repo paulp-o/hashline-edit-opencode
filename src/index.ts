@@ -12,7 +12,6 @@ import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { formatHashLines, computeLineHash } from "./lib/hashline-core";
 import { applyHashlineEdits, type EditOperation } from "./lib/hashline-apply";
-import { buildUnifiedDiff } from "./lib/hashline-diff";
 import { stripNewLinePrefixes } from "./lib/hashline-strip";
 import {
   renderHashlineEditPrompt,
@@ -589,12 +588,6 @@ const plugin: Plugin = async (ctx) => {
             .string()
             .optional()
             .describe("New path to move/rename the file to"),
-          dryRun: tool.schema
-            .boolean()
-            .optional()
-            .describe(
-              "If true, preview changes as a unified diff without writing to disk",
-            ),
         },
         async execute(args, context) {
           // Set descriptive title for OpenCode UI
@@ -605,22 +598,6 @@ const plugin: Plugin = async (ctx) => {
 
           // File deletion
           if (args.delete) {
-            if (args.dryRun) {
-              let fileContent = "";
-              try {
-                fileContent = await Bun.file(resolvedPath).text();
-              } catch {
-                return `Error: Could not read file for dry-run: ${args.path}`;
-              }
-              const fileLines = fileContent.length === 0 ? [] : fileContent.split("\n");
-              const diff = buildUnifiedDiff({
-                oldPath: args.path,
-                newPath: args.path,
-                oldLines: fileLines,
-                newLines: [],
-              });
-              return `Dry run \u2014 no changes written.\n\nWould delete file: ${args.path}\n\n${diff}`;
-            }
             try {
               await unlink(resolvedPath);
               return `Deleted file: ${args.path}`;
@@ -631,8 +608,6 @@ const plugin: Plugin = async (ctx) => {
 
           let lineCountDelta = 0;
           const warnings: string[] = [];
-          let originalLines: string[] = [];
-          let editedContent = "";
 
           // Apply edits if provided
           if (args.edits && args.edits.length > 0) {
@@ -640,12 +615,9 @@ const plugin: Plugin = async (ctx) => {
               const result = await applyHashlineEdits(
                 resolvedPath,
                 args.edits as EditOperation[],
-                { dryRun: !!args.dryRun },
               );
               lineCountDelta = result.lineCountDelta;
               warnings.push(...result.warnings);
-              originalLines = result.originalLines;
-              editedContent = result.content;
             } catch (err) {
               if (err instanceof HashlineMismatchError) {
                 return err.message;
@@ -659,27 +631,6 @@ const plugin: Plugin = async (ctx) => {
 
           // File move/rename (after edits, if any)
           if (args.move) {
-            if (args.dryRun) {
-              if (args.edits && args.edits.length > 0) {
-                const delta =
-                  lineCountDelta >= 0
-                    ? `+${lineCountDelta}`
-                    : `${lineCountDelta}`;
-                const opSummary = summarizeEdits(args.edits as EditOperation[]);
-                const diff = buildUnifiedDiff({
-                  oldPath: args.path,
-                  newPath: args.move,
-                  oldLines: originalLines,
-                  newLines: editedContent.split("\n"),
-                });
-                const warningStr =
-                  warnings.length > 0
-                    ? `\nWarnings:\n${warnings.join("\n")}\n`
-                    : "";
-                return `Dry run for ${args.path} (${delta} lines), would move to ${args.move}\n${opSummary}${warningStr}\n\nNo file changes written.\n\n${diff}`;
-              }
-              return `Dry run \u2014 no changes written.\n\nWould move file: ${args.path} \u2192 ${args.move}`;
-            }
             const resolvedNewPath = resolvePath(args.move, getBaseDir(context));
             try {
               // Ensure target directory exists
@@ -709,7 +660,7 @@ const plugin: Plugin = async (ctx) => {
                   const detection = LspManager.getDetectionResult();
                   if (detection && detection.missing.length > 0) {
                     const missingList = detection.missing
-                      .map(m => `${m.language} (${m.server} not found \u2014 ${m.installHint})`)
+                      .map(m => `${m.language} (${m.server} not found — ${m.installHint})`)
                       .join(", ");
                     diagnostics += `\n\nLSP diagnostics unavailable for: ${missingList}`;
                   }
@@ -719,7 +670,7 @@ const plugin: Plugin = async (ctx) => {
                 }
                 return msg + diagnostics;
               }
-              return `Moved file: ${args.path} \u2192 ${args.move}`;
+              return `Moved file: ${args.path} → ${args.move}`;
             } catch {
               return `Error: Could not move file from ${args.path} to ${args.move}`;
             }
@@ -729,22 +680,8 @@ const plugin: Plugin = async (ctx) => {
           if (args.edits && args.edits.length > 0) {
             const delta =
               lineCountDelta >= 0 ? `+${lineCountDelta}` : `${lineCountDelta}`;
+            // Summarize what was done
             const opSummary = summarizeEdits(args.edits as EditOperation[]);
-
-            if (args.dryRun) {
-              const diff = buildUnifiedDiff({
-                oldPath: args.path,
-                newPath: args.path,
-                oldLines: originalLines,
-                newLines: editedContent.split("\n"),
-              });
-              const warningStr =
-                warnings.length > 0
-                  ? `\nWarnings:\n${warnings.join("\n")}\n`
-                  : "";
-              return `Dry run for ${args.path} (${delta} lines)\n${opSummary}${warningStr}\n\nNo file changes written.\n\n${diff}`;
-            }
-
             const msg = `Applied edits to ${args.path} (${delta} lines)\n${opSummary}`;
             // Collect LSP diagnostics if enabled
             let diagnostics = "";
@@ -759,7 +696,7 @@ const plugin: Plugin = async (ctx) => {
               const detection = LspManager.getDetectionResult();
               if (detection && detection.missing.length > 0) {
                 const missingList = detection.missing
-                  .map(m => `${m.language} (${m.server} not found \u2014 ${m.installHint})`)
+                  .map(m => `${m.language} (${m.server} not found — ${m.installHint})`)
                   .join(", ");
                 diagnostics += `\n\nLSP diagnostics unavailable for: ${missingList}`;
               }

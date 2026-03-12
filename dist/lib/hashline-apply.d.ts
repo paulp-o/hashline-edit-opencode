@@ -29,8 +29,6 @@ export interface ApplyResult {
     content: string;
     lineCountDelta: number;
     warnings: string[];
-    /** Original file lines before edits were applied. */
-    originalLines: string[];
 }
 /**
  * Parse raw EditOperations into normalized internal form.
@@ -81,8 +79,6 @@ export declare function detectNoOp(edit: NormalizedEdit, fileLines: string[]): s
  *   6. Write result atomically
  *   7. Return { content, lineCountDelta, warnings }
  */
-export declare function applyHashlineEdits(filePath: string, edits: EditOperation[], options?: {
-    dryRun?: boolean;
-}): Promise<ApplyResult>;
+export declare function applyHashlineEdits(filePath: string, edits: EditOperation[]): Promise<ApplyResult>;
 export {};
 //# sourceMappingURL=hashline-apply.d.ts.map

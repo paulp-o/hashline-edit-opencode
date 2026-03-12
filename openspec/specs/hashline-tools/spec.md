@@ -61,7 +61,6 @@ Parameters:
 - `edits` (required array): edit operations
 - `delete` (optional boolean): delete file if true
 - `move` (optional string): new path to move file to
-- `dryRun` (optional boolean, default false): preview changes as unified diff without writing
 
 Edit op schema: `{op: "replace"|"append"|"prepend", pos?: string, end?: string, lines: string[]|string|null}`
 
@@ -89,23 +88,6 @@ Edit op schema: `{op: "replace"|"append"|"prepend", pos?: string, end?: string, 
 - **WHEN** calling hashline_edit with move="new/path.ts"
 - **THEN** the file SHALL be moved to new location
 - **AND** success SHALL be reported
-
-#### Scenario: Dry run edit preview
-- **WHEN** calling hashline_edit with path="src/app.ts", edits=[...], dryRun=true
-- **THEN** edits SHALL be computed in-memory without writing to disk
-- **AND** a unified diff preview SHALL be returned showing what would change
-- **AND** hash validation SHALL still be performed
-- **AND** the file on disk SHALL remain unchanged
-
-#### Scenario: Dry run delete preview
-- **WHEN** calling hashline_edit with path="src/old.ts", delete=true, dryRun=true
-- **THEN** the file SHALL NOT be deleted
-- **AND** a preview message SHALL be returned indicating the file would be deleted
-
-#### Scenario: Dry run move preview
-- **WHEN** calling hashline_edit with path="src/old.ts", move="src/new.ts", dryRun=true
-- **THEN** the file SHALL NOT be moved
-- **AND** a preview message SHALL be returned indicating the file would be moved
 
 ### Requirement: hashline_grep Tool
 The system SHALL provide a tool to search files with hashline-annotated results.

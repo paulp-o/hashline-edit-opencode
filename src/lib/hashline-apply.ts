@@ -40,8 +40,6 @@ export interface ApplyResult {
   content: string;
   lineCountDelta: number;
   warnings: string[];
-  /** Original file lines before edits were applied. */
-  originalLines: string[];
 }
 
 // ─── Utility Functions ───────────────────────────────────────────────────────
@@ -356,7 +354,6 @@ function applyPrepend(edit: NormalizedEdit, lines: string[]): string[] {
 export async function applyHashlineEdits(
   filePath: string,
   edits: EditOperation[],
-  options?: { dryRun?: boolean },
 ): Promise<ApplyResult> {
   // Step 1: Read file content
   let fileContent: string;
@@ -409,18 +406,15 @@ export async function applyHashlineEdits(
     }
   }
 
-  // Step 6: Write result — skip when dry-run mode is active
+  // Step 6: Write result (ensure parent directory exists for new files)
   const result = working.join("\n");
-  if (!options?.dryRun) {
-    await mkdir(dirname(filePath), { recursive: true });
-    await Bun.write(filePath, result);
-  }
+  await mkdir(dirname(filePath), { recursive: true });
+  await Bun.write(filePath, result);
 
   // Step 7: Return result
   return {
     content: result,
     lineCountDelta: working.length - originalLineCount,
     warnings,
-    originalLines: fileLines,
   };
 }
