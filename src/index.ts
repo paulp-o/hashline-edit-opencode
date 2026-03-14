@@ -191,10 +191,31 @@ function buildEditTitle(args: {
  *     utils/
  *       helpers.ts ............... 23 lines
  */
+async function getGitIgnoredSet(dirPath: string): Promise<Set<string>> {
+  try {
+    // List all files under dirPath, then batch-check via git check-ignore
+    const proc = Bun.spawn(
+      ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "."],
+      { cwd: dirPath, stdout: "pipe", stderr: "pipe" },
+    );
+    const output = await new Response(proc.stdout).text();
+    await proc.exited;
+    const ignored = new Set<string>();
+    for (const p of output.split("\0")) {
+      const trimmed = p.trim().replace(/\/$/, "");
+      if (trimmed) ignored.add(trimmed.split("/")[0]);
+    }
+    return ignored;
+  } catch {
+    return new Set();
+  }
+}
+
 async function buildDirectoryListing(
   dirPath: string,
   basePath: string,
   indent: string = "",
+  parentIgnored?: Set<string>,
 ): Promise<string> {
   const entries = await readdir(dirPath, { withFileTypes: true });
   entries.sort((a, b) => {
@@ -204,30 +225,35 @@ async function buildDirectoryListing(
     return a.name.localeCompare(b.name);
   });
 
+  // Get gitignored names for this directory level
+  const ignoredSet = parentIgnored ?? (await getGitIgnoredSet(dirPath));
+
   const lines: string[] = [];
 
   for (const entry of entries) {
     // Skip hidden files and common non-code directories
     if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+    // Skip gitignored entries
+    if (ignoredSet.has(entry.name)) continue;
 
     const fullPath = resolve(dirPath, entry.name);
 
     if (entry.isDirectory()) {
       lines.push(`${indent}${entry.name}/`);
+      // Build child ignored set from this subdirectory
+      const childIgnored = await getGitIgnoredSet(fullPath);
       const subListing = await buildDirectoryListing(
         fullPath,
         basePath,
         indent + "  ",
+        childIgnored,
       );
       if (subListing) lines.push(subListing);
     } else {
       try {
         const content = await Bun.file(fullPath).text();
         const lineCount = content.split("\n").length;
-        const dots = ".".repeat(
-          Math.max(3, 40 - indent.length - entry.name.length),
-        );
-        lines.push(`${indent}${entry.name} ${dots} ${lineCount} lines`);
+        lines.push(`${indent}${entry.name} (${lineCount} lines)`);
       } catch {
         lines.push(`${indent}${entry.name} (unreadable)`);
       }
@@ -735,6 +761,9 @@ const plugin: Plugin = async (ctx) => {
             : getBaseDir(context);
           const contextLines = args.context ?? 2;
 
+          // Normalize BRE-style \| → | for grep compatibility
+          const normalizedPattern = args.pattern.replace(/\\\|/g, "|");
+
           // Try ripgrep first
           try {
             const rgArgs: string[] = [
@@ -747,7 +776,7 @@ const plugin: Plugin = async (ctx) => {
               rgArgs.push("--glob", args.include);
             }
 
-            const result = await $`rg ${rgArgs} ${args.pattern} ${searchPath}`
+            const result = await $`rg ${rgArgs} ${normalizedPattern} ${searchPath}`
               .nothrow()
               .quiet()
               .text();
@@ -778,7 +807,7 @@ const plugin: Plugin = async (ctx) => {
           // Fallback: fs-based search
           try {
             const matches = await fsBasedSearch(
-              args.pattern,
+              normalizedPattern,
               searchPath,
               args.include,
               contextLines,

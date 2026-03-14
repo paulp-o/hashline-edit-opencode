@@ -16841,7 +16841,23 @@ function buildEditTitle(args) {
   }
   return parts.join(" \u2014 ");
 }
-async function buildDirectoryListing(dirPath, basePath, indent = "") {
+async function getGitIgnoredSet(dirPath) {
+  try {
+    const proc = Bun.spawn(["git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "."], { cwd: dirPath, stdout: "pipe", stderr: "pipe" });
+    const output = await new Response(proc.stdout).text();
+    await proc.exited;
+    const ignored = new Set;
+    for (const p of output.split("\x00")) {
+      const trimmed = p.trim().replace(/\/$/, "");
+      if (trimmed)
+        ignored.add(trimmed.split("/")[0]);
+    }
+    return ignored;
+  } catch {
+    return new Set;
+  }
+}
+async function buildDirectoryListing(dirPath, basePath, indent = "", parentIgnored) {
   const entries = await readdir2(dirPath, { withFileTypes: true });
   entries.sort((a, b) => {
     if (a.isDirectory() && !b.isDirectory())
@@ -16850,14 +16866,18 @@ async function buildDirectoryListing(dirPath, basePath, indent = "") {
       return 1;
     return a.name.localeCompare(b.name);
   });
+  const ignoredSet = parentIgnored ?? await getGitIgnoredSet(dirPath);
   const lines = [];
   for (const entry of entries) {
     if (entry.name.startsWith(".") || entry.name === "node_modules")
       continue;
+    if (ignoredSet.has(entry.name))
+      continue;
     const fullPath = resolve(dirPath, entry.name);
     if (entry.isDirectory()) {
       lines.push(`${indent}${entry.name}/`);
-      const subListing = await buildDirectoryListing(fullPath, basePath, indent + "  ");
+      const childIgnored = await getGitIgnoredSet(fullPath);
+      const subListing = await buildDirectoryListing(fullPath, basePath, indent + "  ", childIgnored);
       if (subListing)
         lines.push(subListing);
     } else {
@@ -16865,8 +16885,7 @@ async function buildDirectoryListing(dirPath, basePath, indent = "") {
         const content = await Bun.file(fullPath).text();
         const lineCount = content.split(`
 `).length;
-        const dots = ".".repeat(Math.max(3, 40 - indent.length - entry.name.length));
-        lines.push(`${indent}${entry.name} ${dots} ${lineCount} lines`);
+        lines.push(`${indent}${entry.name} (${lineCount} lines)`);
       } catch {
         lines.push(`${indent}${entry.name} (unreadable)`);
       }
@@ -17197,6 +17216,7 @@ ${warnings.join(`
         async execute(args, context) {
           const searchPath = args.path ? resolvePath(args.path, getBaseDir(context)) : getBaseDir(context);
           const contextLines = args.context ?? 2;
+          const normalizedPattern = args.pattern.replace(/\\\|/g, "|");
           try {
             const rgArgs = [
               "--line-number",
@@ -17207,7 +17227,7 @@ ${warnings.join(`
             if (args.include) {
               rgArgs.push("--glob", args.include);
             }
-            const result = await $2`rg ${rgArgs} ${args.pattern} ${searchPath}`.nothrow().quiet().text();
+            const result = await $2`rg ${rgArgs} ${normalizedPattern} ${searchPath}`.nothrow().quiet().text();
             if (result.trim().length === 0) {
               return `No matches found for pattern: ${args.pattern}`;
             }
@@ -17223,7 +17243,7 @@ ${warnings.join(`
             return formatGrepResults(matches);
           } catch {}
           try {
-            const matches = await fsBasedSearch(args.pattern, searchPath, args.include, contextLines);
+            const matches = await fsBasedSearch(normalizedPattern, searchPath, args.include, contextLines);
             if (matches.length === 0) {
               return `No matches found for pattern: ${args.pattern}`;
             }
@@ -17252,5 +17272,5 @@ export {
   src_default as default
 };
 
-//# debugId=838D9154349E2A5264756E2164756E21
+//# debugId=1BBDAB974BA74F3764756E2164756E21
 //# sourceMappingURL=index.js.map

@@ -1,0 +1,21 @@
+store_version: 1
+discovery:
+  enabled: true
+  max_suggestions: 3
+  suggest_action_preference: show_first
+  recent_window_days: 3
+  cooldown_hours: 12
+  rate_limit_minutes: 30
+projection:
+  enabled: true
+  meta_skill_name: mrp
+  max_projected_skills: 15
+  auto_suggest_threshold_runs: 3
+  auto_suggest_window_days: 7
+  hosts:
+    - opencode
+execution:
+  default_timeout_sec: 900
+  default_output_max_kb: 256
+policy:
+  default_network: off
