@@ -29,6 +29,8 @@ export declare class LspClient {
     private diagnosticWaiters;
     constructor(serverName: string, config: LspServerConfig, rootPath: string);
     get isRunning(): boolean;
+    /** Tear down a failed or timed-out start before `initialized` completes. */
+    private abortStartup;
     start(): Promise<void>;
     /** Gracefully shut down the LSP server. */
     stop(): Promise<void>;

@@ -22,6 +22,7 @@ import {
   getLanguageId,
   DIAGNOSTICS_TIMEOUT_MS,
   DIAGNOSTICS_DEBOUNCE_MS,
+  LSP_INITIALIZE_TIMEOUT_MS,
 } from "./types";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -74,6 +75,23 @@ export class LspClient {
       this.process !== null &&
       this.process.exitCode === null
     );
+  }
+
+  /** Tear down a failed or timed-out start before `initialized` completes. */
+  private abortStartup(): void {
+    try {
+      this.connection?.dispose();
+    } catch {
+      /* ignore */
+    }
+    this.connection = null;
+    try {
+      this.process?.kill();
+    } catch {
+      /* ignore */
+    }
+    this.process = null;
+    this._isRunning = false;
   }
 
   // ─── Lifecycle ───────────────────────────────────────────────────────────────
@@ -153,9 +171,9 @@ export class LspClient {
 
     this.connection.listen();
 
-    // Initialize handshake
+    // Initialize handshake (with timeout — hung servers must not block forever)
     const rootUri = pathToFileURL(this.rootPath).href;
-    await this.connection.sendRequest("initialize", {
+    const initParams = {
       processId: process.pid,
       rootUri,
       workspaceFolders: [{ name: "workspace", uri: rootUri }],
@@ -180,9 +198,28 @@ export class LspClient {
         },
       },
       initializationOptions: this.config.initialization ?? {},
-    });
+    };
 
-    await this.connection.sendNotification("initialized", {});
+    try {
+      await Promise.race([
+        this.connection.sendRequest("initialize", initParams),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => {
+            reject(
+              new Error(
+                `LSP server "${this.serverName}" initialize timed out after ${LSP_INITIALIZE_TIMEOUT_MS}ms`,
+              ),
+            );
+          }, LSP_INITIALIZE_TIMEOUT_MS);
+        }),
+      ]);
+      await this.connection.sendNotification("initialized", {});
+    } catch (err) {
+      this.abortStartup();
+      if (err instanceof Error) throw err;
+      throw new Error(String(err));
+    }
+
     this._isRunning = true;
     this.restartAttempts = 0;
 

@@ -214,6 +214,8 @@ Enable automatic diagnostics after every edit:
 export EXPERIMENTAL_LSP_DIAGNOSTICS=true
 ```
 
+Language servers are **not** started during OpenCode startup (only detected from your project and PATH); they connect **lazily** the first time diagnostics are needed, so the UI is not blocked on a hung or slow LSP `initialize`.
+
 When enabled, `hashline_edit` automatically:
 1. Spawns LSP servers configured in `opencode.json`
 2. Sends the file to the LSP after each edit

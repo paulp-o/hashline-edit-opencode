@@ -24,6 +24,7 @@ export interface LspServerInfo {
 
 /** Result of automatic LSP server detection */
 export interface LspDetectionResult {
+  /** Servers found on PATH for this project; `started` is always false (lazy connect on first use). */
   detected: Array<{ language: string; server: string; started: boolean }>;
   missing: Array<{ language: string; server: string; installHint: string }>;
 }
@@ -53,6 +54,9 @@ export const DIAGNOSTICS_TIMEOUT_MS = 3000;
 
 /** Debounce period — wait this long after last diagnostic notification before collecting (ms) */
 export const DIAGNOSTICS_DEBOUNCE_MS = 150;
+
+/** Max time to wait for LSP `initialize` handshake before giving up (ms) */
+export const LSP_INITIALIZE_TIMEOUT_MS = 15_000;
 
 /** Map file extensions to LSP language IDs */
 export const EXTENSION_LANGUAGE_MAP: Record<string, string> = {

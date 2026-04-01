@@ -16141,6 +16141,7 @@ var MAX_DIAGNOSTICS_PER_FILE = 20;
 var MAX_OTHER_FILES = 5;
 var DIAGNOSTICS_TIMEOUT_MS = 3000;
 var DIAGNOSTICS_DEBOUNCE_MS = 150;
+var LSP_INITIALIZE_TIMEOUT_MS = 15000;
 var EXTENSION_LANGUAGE_MAP = {
   ".ts": "typescript",
   ".tsx": "typescriptreact",
@@ -16233,6 +16234,17 @@ class LspClient {
   get isRunning() {
     return this._isRunning && this.process !== null && this.process.exitCode === null;
   }
+  abortStartup() {
+    try {
+      this.connection?.dispose();
+    } catch {}
+    this.connection = null;
+    try {
+      this.process?.kill();
+    } catch {}
+    this.process = null;
+    this._isRunning = false;
+  }
   async start() {
     if (this.isRunning)
       return;
@@ -16277,7 +16289,7 @@ class LspClient {
     ]);
     this.connection.listen();
     const rootUri = pathToFileURL(this.rootPath).href;
-    await this.connection.sendRequest("initialize", {
+    const initParams = {
       processId: process.pid,
       rootUri,
       workspaceFolders: [{ name: "workspace", uri: rootUri }],
@@ -16302,8 +16314,23 @@ class LspClient {
         }
       },
       initializationOptions: this.config.initialization ?? {}
-    });
-    await this.connection.sendNotification("initialized", {});
+    };
+    try {
+      await Promise.race([
+        this.connection.sendRequest("initialize", initParams),
+        new Promise((_, reject) => {
+          setTimeout(() => {
+            reject(new Error(`LSP server "${this.serverName}" initialize timed out after ${LSP_INITIALIZE_TIMEOUT_MS}ms`));
+          }, LSP_INITIALIZE_TIMEOUT_MS);
+        })
+      ]);
+      await this.connection.sendNotification("initialized", {});
+    } catch (err) {
+      this.abortStartup();
+      if (err instanceof Error)
+        throw err;
+      throw new Error(String(err));
+    }
     this._isRunning = true;
     this.restartAttempts = 0;
     this.process.on("exit", () => {
@@ -16547,26 +16574,11 @@ class LspManager {
         mgr.extensionToServer.set(normalizedExt, language);
       }
     }
-    const detected = [];
-    const startPromises = available.map(async ({ language, serverInfo }) => {
-      const representativeExt = serverInfo.extensions[0];
-      const fakePath = `__lsp_probe__${representativeExt}`;
-      try {
-        const client = await LspManager.getClientForFile(fakePath);
-        detected.push({
-          language,
-          server: serverInfo.command[0],
-          started: client !== null
-        });
-      } catch {
-        detected.push({
-          language,
-          server: serverInfo.command[0],
-          started: false
-        });
-      }
-    });
-    await Promise.all(startPromises);
+    const detected = available.map(({ language, serverInfo }) => ({
+      language,
+      server: serverInfo.command[0],
+      started: false
+    }));
     const missingResult = missing.map(({ language, serverInfo }) => ({
       language,
       server: serverInfo.command[0],
@@ -17272,5 +17284,5 @@ export {
   src_default as default
 };
 
-//# debugId=1BBDAB974BA74F3764756E2164756E21
+//# debugId=8DA29C21244F377864756E2164756E21
 //# sourceMappingURL=index.js.map

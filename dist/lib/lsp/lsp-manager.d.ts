@@ -5,7 +5,7 @@
  * lazily spawns servers on first use, and handles crash recovery.
  *
  * Supports automatic LSP server detection: scans project files,
- * checks PATH for known LSP servers, and auto-starts available ones.
+ * checks PATH for known LSP servers, and registers them for lazy startup.
  */
 import { LspClient } from "./lsp-client";
 import type { LspConfig, LspDetectionResult } from "./types";
@@ -42,13 +42,17 @@ export declare class LspManager {
      */
     private checkServerAvailability;
     /**
-     * Auto-detect LSP servers for the project and start available ones.
+     * Auto-detect LSP servers for the project and register them for lazy startup.
+     *
+     * Does **not** spawn LSP processes here — that used to block OpenCode plugin load
+     * indefinitely when `initialize` hung. Servers start on first diagnostic use via
+     * `getClientForFile()`.
      *
      * 1. Scans project files to discover file extensions
      * 2. Matches extensions against the built-in LSP registry
      * 3. Checks PATH for available LSP server executables
      * 4. Builds config and extension map for available servers
-     * 5. Auto-starts available servers
+     * 5. Records which servers were found on PATH (`detected[].started` is always false — lazy)
      *
      * @returns Detection result with available and missing servers
      */

@@ -5,7 +5,7 @@
  * lazily spawns servers on first use, and handles crash recovery.
  *
  * Supports automatic LSP server detection: scans project files,
- * checks PATH for known LSP servers, and auto-starts available ones.
+ * checks PATH for known LSP servers, and registers them for lazy startup.
  */
 
 import { LspClient } from "./lsp-client";
@@ -218,13 +218,17 @@ export class LspManager {
   // ─── Static API ────────────────────────────────────────────────────────────
 
   /**
-   * Auto-detect LSP servers for the project and start available ones.
+   * Auto-detect LSP servers for the project and register them for lazy startup.
+   *
+   * Does **not** spawn LSP processes here — that used to block OpenCode plugin load
+   * indefinitely when `initialize` hung. Servers start on first diagnostic use via
+   * `getClientForFile()`.
    *
    * 1. Scans project files to discover file extensions
    * 2. Matches extensions against the built-in LSP registry
    * 3. Checks PATH for available LSP server executables
    * 4. Builds config and extension map for available servers
-   * 5. Auto-starts available servers
+   * 5. Records which servers were found on PATH (`detected[].started` is always false — lazy)
    *
    * @returns Detection result with available and missing servers
    */
@@ -260,28 +264,14 @@ export class LspManager {
       }
     }
 
-    // Step 4: Auto-start available servers by triggering lazy init
-    const detected: LspDetectionResult["detected"] = [];
-    const startPromises = available.map(async ({ language, serverInfo }) => {
-      // Pick a representative extension to trigger getClientForFile
-      const representativeExt = serverInfo.extensions[0];
-      const fakePath = `__lsp_probe__${representativeExt}`;
-      try {
-        const client = await LspManager.getClientForFile(fakePath);
-        detected.push({
-          language,
-          server: serverInfo.command[0],
-          started: client !== null,
-        });
-      } catch {
-        detected.push({
-          language,
-          server: serverInfo.command[0],
-          started: false,
-        });
-      }
-    });
-    await Promise.all(startPromises);
+    // Step 4: Record PATH-available servers (lazy — no spawn during plugin load)
+    const detected: LspDetectionResult["detected"] = available.map(
+      ({ language, serverInfo }) => ({
+        language,
+        server: serverInfo.command[0],
+        started: false,
+      }),
+    );
 
     // Step 5: Build missing server list
     const missingResult: LspDetectionResult["missing"] = missing.map(

@@ -1,6 +1,6 @@
 {
   "name": "@paulp-o/hashline-edit-opencode",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "HashLine Edit plugin for OpenCode AI - precision line editing with content hashes",
   "type": "module",
   "main": "./dist/index.js",
