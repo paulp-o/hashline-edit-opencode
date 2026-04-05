@@ -16141,8 +16141,8 @@ When \`hashline_edit\` modifies a file, LSP diagnostics (errors, warnings) are a
 }
 
 // src/index.ts
-import { resolve, isAbsolute as isAbsolute2, relative as relative2 } from "path";
-import { readdir as readdir2, stat, unlink, rename, mkdir as mkdir2 } from "fs/promises";
+import { isAbsolute as isAbsolute3, relative as relative2 } from "path";
+import { stat as stat2, unlink, rename, mkdir as mkdir2 } from "fs/promises";
 
 // src/lib/lsp/lsp-client.ts
 var import_node = __toESM(require_main(), 1);
@@ -16765,7 +16765,9 @@ function makeRelative(filePath, baseDir) {
   return filePath;
 }
 
-// src/index.ts
+// src/lib/file-utils.ts
+import { isAbsolute as isAbsolute2, resolve } from "path";
+import { readdir as readdir2 } from "fs/promises";
 var BINARY_EXTENSIONS = new Set([
   ".png",
   ".jpg",
@@ -16805,6 +16807,10 @@ var BINARY_EXTENSIONS = new Set([
   ".woff2",
   ".eot"
 ]);
+function hasBinaryExtension(filePath) {
+  const ext = filePath.slice(filePath.lastIndexOf(".")).toLowerCase();
+  return BINARY_EXTENSIONS.has(ext);
+}
 async function isBinaryFile(filePath) {
   const file2 = Bun.file(filePath);
   const buf = new Uint8Array(await file2.slice(0, 8192).arrayBuffer());
@@ -16812,68 +16818,6 @@ async function isBinaryFile(filePath) {
 }
 function resolvePath(filePath, contextDirectory) {
   return isAbsolute2(filePath) ? filePath : resolve(contextDirectory, filePath);
-}
-function getBaseDir(context) {
-  return context.directory || context.worktree;
-}
-var LSP_DIAGNOSTICS_ENABLED = (() => {
-  const v = process.env.EXPERIMENTAL_LSP_DIAGNOSTICS;
-  if (v === undefined || v === "")
-    return true;
-  const lower = v.trim().toLowerCase();
-  if (lower === "false" || lower === "0" || lower === "off" || lower === "no") {
-    return false;
-  }
-  return true;
-})();
-var hasNotifiedMissingServers = false;
-function summarizeEdits(edits) {
-  const lines = [];
-  for (const edit of edits) {
-    const pos = edit.pos ?? "(none)";
-    if (edit.op === "replace") {
-      const range = edit.end ? `${edit.pos}..${edit.end}` : pos;
-      if (!edit.lines || Array.isArray(edit.lines) && edit.lines.length === 0 || edit.lines === null) {
-        lines.push(`  delete ${range}`);
-      } else {
-        const count = Array.isArray(edit.lines) ? edit.lines.length : 1;
-        lines.push(`  replace ${range} \u2192 ${count} line(s)`);
-      }
-    } else if (edit.op === "append") {
-      const count = Array.isArray(edit.lines) ? edit.lines.length : edit.lines ? 1 : 0;
-      lines.push(`  append ${count} line(s) after ${pos}`);
-    } else if (edit.op === "prepend") {
-      const count = Array.isArray(edit.lines) ? edit.lines.length : edit.lines ? 1 : 0;
-      lines.push(`  prepend ${count} line(s) before ${pos}`);
-    }
-  }
-  return lines.join(`
-`);
-}
-function buildEditTitle(args) {
-  const parts = [args.path];
-  if (args.delete) {
-    parts.push("DELETE");
-  } else if (args.edits && args.edits.length > 0) {
-    const edits = args.edits;
-    const ops = [];
-    for (const e of edits) {
-      if (e.op === "replace" && (!e.lines || Array.isArray(e.lines) && e.lines.length === 0 || e.lines === null)) {
-        ops.push(e.end ? `del ${e.pos}..${e.end}` : `del ${e.pos}`);
-      } else if (e.op === "replace") {
-        ops.push(e.end ? `repl ${e.pos}..${e.end}` : `repl ${e.pos}`);
-      } else if (e.op === "append") {
-        ops.push(e.pos ? `app ${e.pos}` : "app EOF");
-      } else if (e.op === "prepend") {
-        ops.push(e.pos ? `prep ${e.pos}` : "prep BOF");
-      }
-    }
-    parts.push(ops.join(", "));
-  }
-  if (args.move) {
-    parts.push(`\u2192 ${args.move}`);
-  }
-  return parts.join(" \u2014 ");
 }
 async function getGitIgnoredSet(dirPath) {
   try {
@@ -16928,10 +16872,33 @@ async function buildDirectoryListing(dirPath, basePath, indent = "", parentIgnor
   return lines.join(`
 `);
 }
-function hasBinaryExtension(filePath) {
-  const ext = filePath.slice(filePath.lastIndexOf(".")).toLowerCase();
-  return BINARY_EXTENSIONS.has(ext);
+function summarizeEdits(edits) {
+  const lines = [];
+  for (const edit of edits) {
+    const pos = edit.pos ?? "(none)";
+    if (edit.op === "replace") {
+      const range = edit.end ? `${edit.pos}..${edit.end}` : pos;
+      if (!edit.lines || Array.isArray(edit.lines) && edit.lines.length === 0 || edit.lines === null) {
+        lines.push(`  delete ${range}`);
+      } else {
+        const count = Array.isArray(edit.lines) ? edit.lines.length : 1;
+        lines.push(`  replace ${range} \u2192 ${count} line(s)`);
+      }
+    } else if (edit.op === "append") {
+      const count = Array.isArray(edit.lines) ? edit.lines.length : edit.lines ? 1 : 0;
+      lines.push(`  append ${count} line(s) after ${pos}`);
+    } else if (edit.op === "prepend") {
+      const count = Array.isArray(edit.lines) ? edit.lines.length : edit.lines ? 1 : 0;
+      lines.push(`  prepend ${count} line(s) before ${pos}`);
+    }
+  }
+  return lines.join(`
+`);
 }
+
+// src/lib/grep-search.ts
+import { resolve as resolve2 } from "path";
+import { readdir as readdir3, stat } from "fs/promises";
 function looksLikeFilePath(s) {
   return (s.includes("/") || s.includes("\\")) && !s.includes("*") && !s.includes("?");
 }
@@ -17021,11 +16988,11 @@ Total: ${total} matches in ${counts.size} files`);
 `);
 }
 async function* walkDirectory(dir, includePattern) {
-  const entries = await readdir2(dir, { withFileTypes: true });
+  const entries = await readdir3(dir, { withFileTypes: true });
   for (const entry of entries) {
     if (entry.name.startsWith(".") || entry.name === "node_modules")
       continue;
-    const fullPath = resolve(dir, entry.name);
+    const fullPath = resolve2(dir, entry.name);
     if (entry.isDirectory()) {
       yield* walkDirectory(fullPath, includePattern);
     } else {
@@ -17122,6 +17089,47 @@ async function runRipgrep(opts) {
     return null;
   }
 }
+
+// src/index.ts
+function getBaseDir(context) {
+  return context.directory || context.worktree;
+}
+var LSP_DIAGNOSTICS_ENABLED = (() => {
+  const v = process.env.EXPERIMENTAL_LSP_DIAGNOSTICS;
+  if (v === undefined || v === "")
+    return true;
+  const lower = v.trim().toLowerCase();
+  if (lower === "false" || lower === "0" || lower === "off" || lower === "no") {
+    return false;
+  }
+  return true;
+})();
+var hasNotifiedMissingServers = false;
+function buildEditTitle(args) {
+  const parts = [args.path];
+  if (args.delete) {
+    parts.push("DELETE");
+  } else if (args.edits && args.edits.length > 0) {
+    const edits = args.edits;
+    const ops = [];
+    for (const e of edits) {
+      if (e.op === "replace" && (!e.lines || Array.isArray(e.lines) && e.lines.length === 0 || e.lines === null)) {
+        ops.push(e.end ? `del ${e.pos}..${e.end}` : `del ${e.pos}`);
+      } else if (e.op === "replace") {
+        ops.push(e.end ? `repl ${e.pos}..${e.end}` : `repl ${e.pos}`);
+      } else if (e.op === "append") {
+        ops.push(e.pos ? `app ${e.pos}` : "app EOF");
+      } else if (e.op === "prepend") {
+        ops.push(e.pos ? `prep ${e.pos}` : "prep BOF");
+      }
+    }
+    parts.push(ops.join(", "));
+  }
+  if (args.move) {
+    parts.push(`\u2192 ${args.move}`);
+  }
+  return parts.join(" \u2014 ");
+}
 var plugin = async (ctx) => {
   if (LSP_DIAGNOSTICS_ENABLED) {
     const baseDir = ctx.directory || ctx.worktree;
@@ -17143,7 +17151,7 @@ var plugin = async (ctx) => {
           const resolvedPath = resolvePath(args.filePath, getBaseDir(context));
           let pathStat;
           try {
-            pathStat = await stat(resolvedPath);
+            pathStat = await stat2(resolvedPath);
           } catch {
             return `Error: File not found: ${args.filePath}`;
           }
@@ -17363,7 +17371,7 @@ ${warnings.join(`
               if (opts.filesOnly) {
                 return rgOut.split(`
 `).filter(Boolean).map((p) => ({
-                  filePath: isAbsolute2(p) ? relative2(baseDir, p) : p,
+                  filePath: isAbsolute3(p) ? relative2(baseDir, p) : p,
                   lineNumber: 0,
                   isMatch: true,
                   content: ""
@@ -17375,7 +17383,7 @@ ${warnings.join(`
 `)) {
                   const m = line.match(/^(.+?):(\d+)$/);
                   if (m) {
-                    const fp = isAbsolute2(m[1]) ? relative2(baseDir, m[1]) : m[1];
+                    const fp = isAbsolute3(m[1]) ? relative2(baseDir, m[1]) : m[1];
                     const n = parseInt(m[2], 10);
                     for (let i = 0;i < n; i++) {
                       result.push({ filePath: fp, lineNumber: i + 1, isMatch: true, content: "" });
@@ -17386,14 +17394,14 @@ ${warnings.join(`
               }
               const parsed = parseRipgrepOutput(rgOut);
               for (const m of parsed) {
-                if (isAbsolute2(m.filePath))
+                if (isAbsolute3(m.filePath))
                   m.filePath = relative2(baseDir, m.filePath);
               }
               return parsed;
             }
             const fMatches = await fsBasedSearch(opts);
             for (const m of fMatches) {
-              if (isAbsolute2(m.filePath))
+              if (isAbsolute3(m.filePath))
                 m.filePath = relative2(baseDir, m.filePath);
             }
             return fMatches;
@@ -17430,5 +17438,5 @@ export {
   src_default as default
 };
 
-//# debugId=95889852268AE06564756E2164756E21
+//# debugId=8C474BBFE2A8DBD964756E2164756E21
 //# sourceMappingURL=index.js.map

@@ -10,79 +10,37 @@
 
 import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
-import { formatHashLines, computeLineHash } from "./lib/hashline-core";
+import { formatHashLines } from "./lib/hashline-core";
 import { applyHashlineEdits, type EditOperation } from "./lib/hashline-apply";
-import { stripNewLinePrefixes } from "./lib/hashline-strip";
 import {
   renderHashlineEditPrompt,
   TOOL_DESCRIPTIONS,
 } from "./lib/hashline-prompt";
 import { HashlineMismatchError } from "./lib/hashline-errors";
-import { resolve, isAbsolute, relative } from "path";
-import { readdir, stat, unlink, rename, mkdir } from "fs/promises";
+import { isAbsolute, relative } from "path";
+import { stat, unlink, rename, mkdir } from "fs/promises";
 import { collectAndFormatDiagnostics } from "./lib/lsp/lsp-diagnostics";
 import { LspManager } from "./lib/lsp/lsp-manager";
+import {
+  isBinaryFile,
+  hasBinaryExtension,
+  resolvePath,
+  buildDirectoryListing,
+  summarizeEdits,
+} from "./lib/file-utils";
+import {
+  type GrepMatch,
+  type GrepOptions,
+  looksLikeFilePath,
+  parseRipgrepOutput,
+  formatGrepResults,
+  formatFilesOnlyResults,
+  formatCountResults,
+  runRipgrep,
+  fsBasedSearch,
+} from "./lib/grep-search";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/** Known binary/image/PDF extensions to reject early. */
-const BINARY_EXTENSIONS = new Set([
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".gif",
-  ".bmp",
-  ".ico",
-  ".webp",
-  ".svg",
-  ".pdf",
-  ".zip",
-  ".tar",
-  ".gz",
-  ".bz2",
-  ".7z",
-  ".rar",
-  ".exe",
-  ".dll",
-  ".so",
-  ".dylib",
-  ".o",
-  ".a",
-  ".wasm",
-  ".class",
-  ".jar",
-  ".pyc",
-  ".pyo",
-  ".mp3",
-  ".mp4",
-  ".wav",
-  ".avi",
-  ".mov",
-  ".mkv",
-  ".ttf",
-  ".otf",
-  ".woff",
-  ".woff2",
-  ".eot",
-]);
-
-/**
- * Detect binary files by checking for null bytes in the first 8KB.
- * Returns true if the file appears to be binary.
- */
-async function isBinaryFile(filePath: string): Promise<boolean> {
-  const file = Bun.file(filePath);
-  const buf = new Uint8Array(await file.slice(0, 8192).arrayBuffer());
-  return buf.includes(0);
-}
-
-/**
- * Resolve a path relative to the context directory.
- * If the path is already absolute, it's returned as-is.
- */
-function resolvePath(filePath: string, contextDirectory: string): string {
-  return isAbsolute(filePath) ? filePath : resolve(contextDirectory, filePath);
-}
 
 /** Get the effective base directory from plugin context. */
 function getBaseDir(context: { directory: string; worktree: string }): string {
@@ -113,45 +71,6 @@ const LSP_DIAGNOSTICS_ENABLED = (() => {
 
 /** Track whether we have already notified about missing LSP servers. */
 let hasNotifiedMissingServers = false;
-
-/**
- * Summarize edit operations for the response message.
- * Gives a concise description of what each edit did.
- */
-function summarizeEdits(edits: EditOperation[]): string {
-  const lines: string[] = [];
-  for (const edit of edits) {
-    const pos = edit.pos ?? "(none)";
-    if (edit.op === "replace") {
-      const range = edit.end ? `${edit.pos}..${edit.end}` : pos;
-      if (
-        !edit.lines ||
-        (Array.isArray(edit.lines) && edit.lines.length === 0) ||
-        edit.lines === null
-      ) {
-        lines.push(`  delete ${range}`);
-      } else {
-        const count = Array.isArray(edit.lines) ? edit.lines.length : 1;
-        lines.push(`  replace ${range} → ${count} line(s)`);
-      }
-    } else if (edit.op === "append") {
-      const count = Array.isArray(edit.lines)
-        ? edit.lines.length
-        : edit.lines
-          ? 1
-          : 0;
-      lines.push(`  append ${count} line(s) after ${pos}`);
-    } else if (edit.op === "prepend") {
-      const count = Array.isArray(edit.lines)
-        ? edit.lines.length
-        : edit.lines
-          ? 1
-          : 0;
-      lines.push(`  prepend ${count} line(s) before ${pos}`);
-    }
-  }
-  return lines.join("\n");
-}
 
 /**
  * Build a descriptive title for the hashline_edit tool call.
@@ -196,368 +115,6 @@ function buildEditTitle(args: {
   return parts.join(" — ");
 }
 
-/**
- * Build a tree listing of a directory with line counts.
- *
- * Format:
- *   src/
- *     components/
- *       Button.tsx ............... 45 lines
- *     utils/
- *       helpers.ts ............... 23 lines
- */
-async function getGitIgnoredSet(dirPath: string): Promise<Set<string>> {
-  try {
-    // List all files under dirPath, then batch-check via git check-ignore
-    const proc = Bun.spawn(
-      ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "."],
-      { cwd: dirPath, stdout: "pipe", stderr: "pipe" },
-    );
-    const output = await new Response(proc.stdout).text();
-    await proc.exited;
-    const ignored = new Set<string>();
-    for (const p of output.split("\0")) {
-      const trimmed = p.trim().replace(/\/$/, "");
-      if (trimmed) ignored.add(trimmed.split("/")[0]);
-    }
-    return ignored;
-  } catch {
-    return new Set();
-  }
-}
-
-async function buildDirectoryListing(
-  dirPath: string,
-  basePath: string,
-  indent: string = "",
-  parentIgnored?: Set<string>,
-): Promise<string> {
-  const entries = await readdir(dirPath, { withFileTypes: true });
-  entries.sort((a, b) => {
-    // Directories first, then alphabetical
-    if (a.isDirectory() && !b.isDirectory()) return -1;
-    if (!a.isDirectory() && b.isDirectory()) return 1;
-    return a.name.localeCompare(b.name);
-  });
-
-  // Get gitignored names for this directory level
-  const ignoredSet = parentIgnored ?? (await getGitIgnoredSet(dirPath));
-
-  const lines: string[] = [];
-
-  for (const entry of entries) {
-    // Skip hidden files and common non-code directories
-    if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
-    // Skip gitignored entries
-    if (ignoredSet.has(entry.name)) continue;
-
-    const fullPath = resolve(dirPath, entry.name);
-
-    if (entry.isDirectory()) {
-      lines.push(`${indent}${entry.name}/`);
-      // Build child ignored set from this subdirectory
-      const childIgnored = await getGitIgnoredSet(fullPath);
-      const subListing = await buildDirectoryListing(
-        fullPath,
-        basePath,
-        indent + "  ",
-        childIgnored,
-      );
-      if (subListing) lines.push(subListing);
-    } else {
-      try {
-        const content = await Bun.file(fullPath).text();
-        const lineCount = content.split("\n").length;
-        lines.push(`${indent}${entry.name} (${lineCount} lines)`);
-      } catch {
-        lines.push(`${indent}${entry.name} (unreadable)`);
-      }
-    }
-  }
-
-  return lines.join("\n");
-}
-
-/**
- * Check if a path has a known binary extension.
- */
-function hasBinaryExtension(filePath: string): boolean {
-  const ext = filePath.slice(filePath.lastIndexOf(".")).toLowerCase();
-  return BINARY_EXTENSIONS.has(ext);
-}
-
-// ─── Ripgrep Parsing ─────────────────────────────────────────────────────────
-
-interface GrepMatch {
-  filePath: string;
-  lineNumber: number;
-  isMatch: boolean; // true = match line, false = context line
-  content: string;
-}
-
-/**
- * Options object for both ripgrep and fs-based grep.
- */
-interface GrepOptions {
-  pattern: string;
-  searchPath: string;
-  contextLines: number;
-  includeGlob?: string;
-  ignoreCase?: boolean;
-  filesOnly?: boolean;
-  invertMatch?: boolean;
-  countOnly?: boolean;
-}
-
-/**
- * Returns true when a string looks like a file path rather than a glob pattern.
- * Heuristic: contains a path separator and has no glob wildcard characters.
- */
-function looksLikeFilePath(s: string): boolean {
-  return (s.includes("/") || s.includes("\\")) && !s.includes("*") && !s.includes("?");
-}
-
-/**
- * Parse ripgrep output into structured matches.
- *
- * Line formats:
- *   match:   path:linenum:content
- *   context: path-linenum-content
- *   separator: --
- */
-function parseRipgrepOutput(output: string): GrepMatch[] {
-  const results: GrepMatch[] = [];
-  const lines = output.split("\n");
-
-  for (const line of lines) {
-    if (!line || line === "--") continue;
-
-    // Match line: path:linenum:content
-    const matchResult = line.match(/^(.+?):(\d+):(.*)$/);
-    if (matchResult) {
-      results.push({
-        filePath: matchResult[1],
-        lineNumber: parseInt(matchResult[2], 10),
-        isMatch: true,
-        content: matchResult[3],
-      });
-      continue;
-    }
-
-    // Context line: path-linenum-content
-    const contextResult = line.match(/^(.+?)-(\d+)-(.*)$/);
-    if (contextResult) {
-      results.push({
-        filePath: contextResult[1],
-        lineNumber: parseInt(contextResult[2], 10),
-        isMatch: false,
-        content: contextResult[3],
-      });
-    }
-  }
-
-  return results;
-}
-
-/**
- * Group grep matches by file and format with hashline annotations.
- */
-function formatGrepResults(matches: GrepMatch[]): string {
-  if (matches.length === 0) return "";
-
-  // Group by file
-  const fileGroups = new Map<string, GrepMatch[]>();
-  for (const match of matches) {
-    const group = fileGroups.get(match.filePath);
-    if (group) {
-      group.push(match);
-    } else {
-      fileGroups.set(match.filePath, [match]);
-    }
-  }
-
-  const sections: string[] = [];
-
-  for (const [filePath, fileMatches] of fileGroups) {
-    const lines: string[] = [`## ${filePath}`];
-
-    // Sort by line number
-    fileMatches.sort((a, b) => a.lineNumber - b.lineNumber);
-
-    for (const m of fileMatches) {
-      const hash = computeLineHash(m.content, m.lineNumber);
-      const tag = `${m.lineNumber}#${hash}:${m.content}`;
-      if (m.isMatch) {
-        lines.push(`> ${tag}`);
-      } else {
-        lines.push(`  ${tag}`);
-      }
-    }
-
-    sections.push(lines.join("\n"));
-  }
-
-  return sections.join("\n\n");
-}
-
-/**
- * Format results as a deduplicated list of file paths (filesOnly mode).
- */
-function formatFilesOnlyResults(matches: GrepMatch[]): string {
-  const seen = new Set<string>();
-  for (const m of matches) seen.add(m.filePath);
-  return [...seen].join("\n");
-}
-
-/**
- * Format per-file match counts (countOnly mode).
- */
-function formatCountResults(matches: GrepMatch[]): string {
-  const counts = new Map<string, number>();
-  for (const m of matches) {
-    if (m.isMatch) counts.set(m.filePath, (counts.get(m.filePath) ?? 0) + 1);
-  }
-  const lines: string[] = [];
-  let total = 0;
-  for (const [filePath, count] of counts) {
-    lines.push(`${filePath}: ${count}`);
-    total += count;
-  }
-  lines.push(`\nTotal: ${total} matches in ${counts.size} files`);
-  return lines.join("\n");
-}
-
-// ─── Fallback FS-based Search ────────────────────────────────────────────────
-
-/**
- * Walk a directory recursively, yielding file paths.
- */
-async function* walkDirectory(
-  dir: string,
-  includePattern?: RegExp,
-): AsyncGenerator<string> {
-  const entries = await readdir(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
-    const fullPath = resolve(dir, entry.name);
-    if (entry.isDirectory()) {
-      yield* walkDirectory(fullPath, includePattern);
-    } else {
-      if (includePattern && !includePattern.test(entry.name)) continue;
-      yield fullPath;
-    }
-  }
-}
-
-/**
- * Convert a glob-like include pattern (e.g. "*.ts") to a RegExp.
- */
-function globToRegex(pattern: string): RegExp {
-  const escaped = pattern
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*/g, ".*")
-    .replace(/\?/g, ".");
-  return new RegExp(`^${escaped}$`);
-}
-
-/**
- * Fallback search using the filesystem (no ripgrep dependency).
- */
-async function fsBasedSearch(opts: GrepOptions): Promise<GrepMatch[]> {
-  const { pattern, searchPath, contextLines, includeGlob, ignoreCase, invertMatch } = opts;
-  const regexFlags = ignoreCase ? "i" : "";
-  const regex = new RegExp(pattern, regexFlags);
-  const includeRe = includeGlob ? globToRegex(includeGlob) : undefined;
-  const allMatches: GrepMatch[] = [];
-
-  // If searchPath is a file, search it directly without directory walk
-  let filePaths: AsyncIterable<string>;
-  const pathStat = await stat(searchPath).catch(() => null);
-  if (pathStat?.isFile()) {
-    filePaths = (async function* () { yield searchPath; })();
-  } else {
-    filePaths = walkDirectory(searchPath, includeRe);
-  }
-
-  for await (const filePath of filePaths) {
-    if (hasBinaryExtension(filePath)) continue;
-
-    try {
-      const content = await Bun.file(filePath).text();
-      const lines = content.split("\n");
-
-      const matchIndices: number[] = [];
-      for (let i = 0; i < lines.length; i++) {
-        if (invertMatch ? !regex.test(lines[i]) : regex.test(lines[i])) {
-          matchIndices.push(i);
-        }
-      }
-
-      if (matchIndices.length === 0) continue;
-
-      // Collect lines with context
-      const includedLines = new Set<number>();
-      for (const idx of matchIndices) {
-        for (
-          let c = Math.max(0, idx - contextLines);
-          c <= Math.min(lines.length - 1, idx + contextLines);
-          c++
-        ) {
-          includedLines.add(c);
-        }
-      }
-
-      const sortedIndices = Array.from(includedLines).sort((a, b) => a - b);
-      const matchSet = new Set(matchIndices);
-
-      for (const idx of sortedIndices) {
-        allMatches.push({
-          filePath: filePath,
-          lineNumber: idx + 1,
-          isMatch: matchSet.has(idx),
-          content: lines[idx],
-        });
-      }
-    } catch {
-      // Skip unreadable files
-    }
-  }
-
-  return allMatches;
-}
-
-/**
- * Run ripgrep with argv-safe `-e PATTERN -- PATH` (handles spaces, long patterns, leading `-`).
- * Returns stdout text, or null if rg is missing or exits with error (caller may fall back to fs search).
- */
-async function runRipgrep(opts: GrepOptions): Promise<string | null> {
-  const { pattern, searchPath, contextLines, includeGlob, ignoreCase, filesOnly, invertMatch, countOnly } = opts;
-  const argv = [
-    "rg",
-    "--line-number",
-    "--with-filename",
-    "--color=never",
-    "--max-columns=0",
-  ];
-  // Context lines are irrelevant for filesOnly and countOnly modes
-  if (!filesOnly && !countOnly) argv.push(`-C${contextLines}`);
-  if (ignoreCase) argv.push("--ignore-case");
-  if (filesOnly) argv.push("--files-with-matches");
-  if (invertMatch) argv.push("--invert-match");
-  if (countOnly) argv.push("--count");
-  if (includeGlob) argv.push("--glob", includeGlob);
-  argv.push("-e", pattern, "--", searchPath);
-
-  try {
-    const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" });
-    const stdout = await new Response(proc.stdout).text();
-    const exit = await proc.exited;
-    if (exit === 2) return null;
-    return stdout;
-  } catch {
-    return null;
-  }
-}
 
 // ─── Plugin ──────────────────────────────────────────────────────────────────
 
