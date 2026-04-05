@@ -1,6 +1,5 @@
 /**
  * lsp-diagnostics.ts — Diagnostics collection and formatting.
- *
  * Collects LSP diagnostics after file edits and formats them
  * to match OpenCode's built-in edit tool output format:
  *
@@ -31,8 +30,7 @@ declare function formatFileDiagnostics(filePath: string, diagnostics: FormattedD
  * Steps:
  * 1. Touch the edited file on its LSP server (triggers re-analysis + waits for diagnostics)
  * 2. Collect diagnostics for the edited file
- * 3. Collect diagnostics from other project files (up to MAX_OTHER_FILES)
- * 4. Format everything into OpenCode's XML diagnostic format
+ * 3. Format into OpenCode's XML diagnostic format
  *
  * @param editedFilePath Absolute path of the file that was just edited
  * @param baseDir Project root for making paths relative

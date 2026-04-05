@@ -1,6 +1,5 @@
 /**
  * lsp-diagnostics.ts — Diagnostics collection and formatting.
- *
  * Collects LSP diagnostics after file edits and formats them
  * to match OpenCode's built-in edit tool output format:
  *
@@ -12,9 +11,8 @@
 
 import { LspManager } from "./lsp-manager";
 import type { FormattedDiagnostic } from "./types";
-import { MAX_DIAGNOSTICS_PER_FILE, MAX_OTHER_FILES } from "./types";
+import { MAX_DIAGNOSTICS_PER_FILE } from "./types";
 import { relative, isAbsolute } from "path";
-import { fileURLToPath } from "node:url";
 
 /**
  * Format a single diagnostic line: "SEVERITY [line:col] message"
@@ -66,8 +64,7 @@ function formatFileDiagnostics(
  * Steps:
  * 1. Touch the edited file on its LSP server (triggers re-analysis + waits for diagnostics)
  * 2. Collect diagnostics for the edited file
- * 3. Collect diagnostics from other project files (up to MAX_OTHER_FILES)
- * 4. Format everything into OpenCode's XML diagnostic format
+ * 3. Format into OpenCode's XML diagnostic format
  *
  * @param editedFilePath Absolute path of the file that was just edited
  * @param baseDir Project root for making paths relative
@@ -97,42 +94,6 @@ export async function collectAndFormatDiagnostics(
     sections.push(formatFileDiagnostics(editedRelPath, editedDiags));
   }
 
-  // 2. Diagnostics from other project files (from ALL active LSP clients)
-  const otherFileSections: string[] = [];
-  const allClients = LspManager.getActiveClients();
-
-  for (const c of allClients) {
-    const allDiags = c.getAllDiagnostics();
-    for (const [uri, diags] of allDiags) {
-      // Convert URI to file path
-      let filePath: string;
-      try {
-        filePath = fileURLToPath(uri);
-      } catch {
-        continue; // Skip non-file URIs
-      }
-
-      // Skip the edited file (already handled above)
-      if (filePath === editedFilePath) continue;
-
-      // Only include files with errors or warnings
-      const significant = diags.filter(
-        (d) => d.severity === "ERROR" || d.severity === "WARN",
-      );
-      if (significant.length === 0) continue;
-
-      const relPath = makeRelative(filePath, baseDir);
-      otherFileSections.push(
-        formatFileDiagnostics(relPath, significant),
-      );
-
-      if (otherFileSections.length >= MAX_OTHER_FILES) break;
-    }
-
-    if (otherFileSections.length >= MAX_OTHER_FILES) break;
-  }
-
-  sections.push(...otherFileSections);
 
   if (sections.length === 0) return "";
   return "\n\n" + sections.join("\n\n");

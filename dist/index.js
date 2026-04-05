@@ -16151,7 +16151,6 @@ import { pathToFileURL } from "url";
 
 // src/lib/lsp/types.ts
 var MAX_DIAGNOSTICS_PER_FILE = 20;
-var MAX_OTHER_FILES = 5;
 var DIAGNOSTICS_TIMEOUT_MS = 3000;
 var DIAGNOSTICS_DEBOUNCE_MS = 150;
 var LSP_INITIALIZE_TIMEOUT_MS = 15000;
@@ -16684,7 +16683,6 @@ class LspManager {
 
 // src/lib/lsp/lsp-diagnostics.ts
 import { relative, isAbsolute } from "path";
-import { fileURLToPath } from "url";
 function formatDiagnosticLine(d) {
   const source = d.source ? `[${d.source}] ` : "";
   return `${d.severity} [${d.line}:${d.col}] ${source}${d.message}`;
@@ -16725,31 +16723,6 @@ async function collectAndFormatDiagnostics(editedFilePath, baseDir) {
   if (editedDiags.length > 0) {
     sections.push(formatFileDiagnostics(editedRelPath, editedDiags));
   }
-  const otherFileSections = [];
-  const allClients = LspManager.getActiveClients();
-  for (const c of allClients) {
-    const allDiags = c.getAllDiagnostics();
-    for (const [uri, diags] of allDiags) {
-      let filePath;
-      try {
-        filePath = fileURLToPath(uri);
-      } catch {
-        continue;
-      }
-      if (filePath === editedFilePath)
-        continue;
-      const significant = diags.filter((d) => d.severity === "ERROR" || d.severity === "WARN");
-      if (significant.length === 0)
-        continue;
-      const relPath = makeRelative(filePath, baseDir);
-      otherFileSections.push(formatFileDiagnostics(relPath, significant));
-      if (otherFileSections.length >= MAX_OTHER_FILES)
-        break;
-    }
-    if (otherFileSections.length >= MAX_OTHER_FILES)
-      break;
-  }
-  sections.push(...otherFileSections);
   if (sections.length === 0)
     return "";
   return `
@@ -17438,5 +17411,5 @@ export {
   src_default as default
 };
 
-//# debugId=8C474BBFE2A8DBD964756E2164756E21
+//# debugId=9471DD46BDB4C36E64756E2164756E21
 //# sourceMappingURL=index.js.map
