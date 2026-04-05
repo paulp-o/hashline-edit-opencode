@@ -91,9 +91,24 @@ function getBaseDir(context: { directory: string; worktree: string }): string {
 
 // ─── LSP Diagnostics ──────────────────────────────────────────────────────
 
-/** Check if experimental LSP diagnostics feature is enabled via env var. */
-const LSP_DIAGNOSTICS_ENABLED =
-  process.env.EXPERIMENTAL_LSP_DIAGNOSTICS === "true";
+/**
+ * LSP diagnostics after edits (default: on).
+ * Set `EXPERIMENTAL_LSP_DIAGNOSTICS=false` (or `0` / `off` / `no`) to disable.
+ */
+const LSP_DIAGNOSTICS_ENABLED = (() => {
+  const v = process.env.EXPERIMENTAL_LSP_DIAGNOSTICS;
+  if (v === undefined || v === "") return true;
+  const lower = v.trim().toLowerCase();
+  if (
+    lower === "false" ||
+    lower === "0" ||
+    lower === "off" ||
+    lower === "no"
+  ) {
+    return false;
+  }
+  return true;
+})();
 
 
 /** Track whether we have already notified about missing LSP servers. */
@@ -281,6 +296,28 @@ interface GrepMatch {
 }
 
 /**
+ * Options object for both ripgrep and fs-based grep.
+ */
+interface GrepOptions {
+  pattern: string;
+  searchPath: string;
+  contextLines: number;
+  includeGlob?: string;
+  ignoreCase?: boolean;
+  filesOnly?: boolean;
+  invertMatch?: boolean;
+  countOnly?: boolean;
+}
+
+/**
+ * Returns true when a string looks like a file path rather than a glob pattern.
+ * Heuristic: contains a path separator and has no glob wildcard characters.
+ */
+function looksLikeFilePath(s: string): boolean {
+  return (s.includes("/") || s.includes("\\")) && !s.includes("*") && !s.includes("?");
+}
+
+/**
  * Parse ripgrep output into structured matches.
  *
  * Line formats:
@@ -363,6 +400,33 @@ function formatGrepResults(matches: GrepMatch[]): string {
   return sections.join("\n\n");
 }
 
+/**
+ * Format results as a deduplicated list of file paths (filesOnly mode).
+ */
+function formatFilesOnlyResults(matches: GrepMatch[]): string {
+  const seen = new Set<string>();
+  for (const m of matches) seen.add(m.filePath);
+  return [...seen].join("\n");
+}
+
+/**
+ * Format per-file match counts (countOnly mode).
+ */
+function formatCountResults(matches: GrepMatch[]): string {
+  const counts = new Map<string, number>();
+  for (const m of matches) {
+    if (m.isMatch) counts.set(m.filePath, (counts.get(m.filePath) ?? 0) + 1);
+  }
+  const lines: string[] = [];
+  let total = 0;
+  for (const [filePath, count] of counts) {
+    lines.push(`${filePath}: ${count}`);
+    total += count;
+  }
+  lines.push(`\nTotal: ${total} matches in ${counts.size} files`);
+  return lines.join("\n");
+}
+
 // ─── Fallback FS-based Search ────────────────────────────────────────────────
 
 /**
@@ -399,17 +463,23 @@ function globToRegex(pattern: string): RegExp {
 /**
  * Fallback search using the filesystem (no ripgrep dependency).
  */
-async function fsBasedSearch(
-  pattern: string,
-  searchPath: string,
-  include?: string,
-  contextLines: number = 2,
-): Promise<GrepMatch[]> {
-  const regex = new RegExp(pattern);
-  const includeRe = include ? globToRegex(include) : undefined;
+async function fsBasedSearch(opts: GrepOptions): Promise<GrepMatch[]> {
+  const { pattern, searchPath, contextLines, includeGlob, ignoreCase, invertMatch } = opts;
+  const regexFlags = ignoreCase ? "i" : "";
+  const regex = new RegExp(pattern, regexFlags);
+  const includeRe = includeGlob ? globToRegex(includeGlob) : undefined;
   const allMatches: GrepMatch[] = [];
 
-  for await (const filePath of walkDirectory(searchPath, includeRe)) {
+  // If searchPath is a file, search it directly without directory walk
+  let filePaths: AsyncIterable<string>;
+  const pathStat = await stat(searchPath).catch(() => null);
+  if (pathStat?.isFile()) {
+    filePaths = (async function* () { yield searchPath; })();
+  } else {
+    filePaths = walkDirectory(searchPath, includeRe);
+  }
+
+  for await (const filePath of filePaths) {
     if (hasBinaryExtension(filePath)) continue;
 
     try {
@@ -418,7 +488,7 @@ async function fsBasedSearch(
 
       const matchIndices: number[] = [];
       for (let i = 0; i < lines.length; i++) {
-        if (regex.test(lines[i])) {
+        if (invertMatch ? !regex.test(lines[i]) : regex.test(lines[i])) {
           matchIndices.push(i);
         }
       }
@@ -456,11 +526,42 @@ async function fsBasedSearch(
   return allMatches;
 }
 
+/**
+ * Run ripgrep with argv-safe `-e PATTERN -- PATH` (handles spaces, long patterns, leading `-`).
+ * Returns stdout text, or null if rg is missing or exits with error (caller may fall back to fs search).
+ */
+async function runRipgrep(opts: GrepOptions): Promise<string | null> {
+  const { pattern, searchPath, contextLines, includeGlob, ignoreCase, filesOnly, invertMatch, countOnly } = opts;
+  const argv = [
+    "rg",
+    "--line-number",
+    "--with-filename",
+    "--color=never",
+    "--max-columns=0",
+  ];
+  // Context lines are irrelevant for filesOnly and countOnly modes
+  if (!filesOnly && !countOnly) argv.push(`-C${contextLines}`);
+  if (ignoreCase) argv.push("--ignore-case");
+  if (filesOnly) argv.push("--files-with-matches");
+  if (invertMatch) argv.push("--invert-match");
+  if (countOnly) argv.push("--count");
+  if (includeGlob) argv.push("--glob", includeGlob);
+  argv.push("-e", pattern, "--", searchPath);
+
+  try {
+    const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" });
+    const stdout = await new Response(proc.stdout).text();
+    const exit = await proc.exited;
+    if (exit === 2) return null;
+    return stdout;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Plugin ──────────────────────────────────────────────────────────────────
 
 const plugin: Plugin = async (ctx) => {
-  const { $ } = ctx;
-
   // ─── LSP Configuration ──────────────────────────────────────────────
   if (LSP_DIAGNOSTICS_ENABLED) {
     const baseDir = ctx.directory || ctx.worktree;
@@ -754,83 +855,142 @@ const plugin: Plugin = async (ctx) => {
             .number()
             .optional()
             .describe("Number of context lines around matches (default 2)"),
+          ignoreCase: tool.schema
+            .boolean()
+            .optional()
+            .describe("Case-insensitive matching (default: false)"),
+          filesOnly: tool.schema
+            .boolean()
+            .optional()
+            .describe("Return only file paths with matches, no line content (default: false)"),
+          invertMatch: tool.schema
+            .boolean()
+            .optional()
+            .describe("Return non-matching lines, like grep -v (default: false)"),
+          countOnly: tool.schema
+            .boolean()
+            .optional()
+            .describe("Return only match counts per file, like grep -c (default: false)"),
+          paths: tool.schema
+            .array(tool.schema.string())
+            .optional()
+            .describe("Array of paths to search (alternative to path for multi-path searches)"),
         },
         async execute(args, context) {
-          const searchPath = args.path
-            ? resolvePath(args.path, getBaseDir(context))
-            : getBaseDir(context);
+          const baseDir = getBaseDir(context);
+
+          // BUG 1 fix: detect when `include` is used as a file path instead of a glob
+          let resolvedPath = args.path;
+          let resolvedInclude = args.include;
+          if (args.include && looksLikeFilePath(args.include)) {
+            if (args.path) {
+              return (
+                `Error: The \`include\` parameter expects a glob pattern (e.g. "*.ts"), not a file path. ` +
+                `Use the \`path\` parameter to specify a file path. Both \`include\` and \`path\` were provided.`
+              );
+            }
+            // Treat the include value as the search path
+            resolvedPath = args.include;
+            resolvedInclude = undefined;
+          }
+
           const contextLines = args.context ?? 2;
 
           // Normalize BRE-style \| → | for grep compatibility
           const normalizedPattern = args.pattern.replace(/\\\|/g, "|");
 
-          // Try ripgrep first
-          try {
-            const rgArgs: string[] = [
-              "--line-number",
-              "--with-filename",
-              `-C${contextLines}`,
-              "--color=never",
-            ];
-            if (args.include) {
-              rgArgs.push("--glob", args.include);
-            }
-
-            const result = await $`rg ${rgArgs} ${normalizedPattern} ${searchPath}`
-              .nothrow()
-              .quiet()
-              .text();
-
-            // Exit code 1 = no matches (normal), exit code 2+ = error
-            if (result.trim().length === 0) {
-              return `No matches found for pattern: ${args.pattern}`;
-            }
-
-            // Parse and format ripgrep output
-            const matches = parseRipgrepOutput(result);
-            if (matches.length === 0) {
-              return `No matches found for pattern: ${args.pattern}`;
-            }
-
-            // Make file paths relative to search path for cleaner display
-            for (const m of matches) {
-              if (isAbsolute(m.filePath)) {
-                m.filePath = relative(getBaseDir(context), m.filePath);
-              }
-            }
-
-            return formatGrepResults(matches);
-          } catch {
-            // Ripgrep not available — fall back to fs-based search
+          // Validate mutually exclusive modes
+          if (args.filesOnly && args.countOnly) {
+            return "Error: `filesOnly` and `countOnly` cannot both be true.";
           }
 
-          // Fallback: fs-based search
-          try {
-            const matches = await fsBasedSearch(
-              normalizedPattern,
-              searchPath,
-              args.include,
-              contextLines,
-            );
+          const baseGrepOpts = {
+            pattern: normalizedPattern,
+            contextLines,
+            includeGlob: resolvedInclude,
+            ignoreCase: args.ignoreCase ?? false,
+            filesOnly: args.filesOnly ?? false,
+            invertMatch: args.invertMatch ?? false,
+            countOnly: args.countOnly ?? false,
+          };
 
-            if (matches.length === 0) {
-              return `No matches found for pattern: ${args.pattern}`;
-            }
-
-            // Make file paths relative
-            for (const m of matches) {
-              if (isAbsolute(m.filePath)) {
-                m.filePath = relative(getBaseDir(context), m.filePath);
-              }
-            }
-
-            return formatGrepResults(matches);
-          } catch (err) {
-            if (err instanceof Error) {
-              return `Error during search: ${err.message}`;
-            }
-            return `Error during search for pattern: ${args.pattern}`;
+          // Determine search paths (multi-path support via `paths` array)
+          const rawPaths: string[] = [];
+          if (args.paths && args.paths.length > 0) {
+            rawPaths.push(...args.paths);
+          } else {
+            rawPaths.push(resolvedPath ?? "");
           }
+
+          // Run one search per path, merging results
+          const searchOnePath = async (rawP: string): Promise<GrepMatch[]> => {
+            const sp = rawP ? resolvePath(rawP, baseDir) : baseDir;
+            const opts: GrepOptions = { ...baseGrepOpts, searchPath: sp };
+
+            const rgOut = await runRipgrep(opts);
+            if (rgOut !== null) {
+              if (rgOut.trim().length === 0) return [];
+
+              if (opts.filesOnly) {
+                // --files-with-matches output: one file path per line
+                return rgOut.split("\n").filter(Boolean).map((p) => ({
+                  filePath: isAbsolute(p) ? relative(baseDir, p) : p,
+                  lineNumber: 0,
+                  isMatch: true,
+                  content: "",
+                }));
+              }
+
+              if (opts.countOnly) {
+                // --count output: path:count per line
+                const result: GrepMatch[] = [];
+                for (const line of rgOut.split("\n")) {
+                  const m = line.match(/^(.+?):(\d+)$/);
+                  if (m) {
+                    const fp = isAbsolute(m[1]) ? relative(baseDir, m[1]) : m[1];
+                    const n = parseInt(m[2], 10);
+                    for (let i = 0; i < n; i++) {
+                      result.push({ filePath: fp, lineNumber: i + 1, isMatch: true, content: "" });
+                    }
+                  }
+                }
+                return result;
+              }
+
+              const parsed = parseRipgrepOutput(rgOut);
+              for (const m of parsed) {
+                if (isAbsolute(m.filePath)) m.filePath = relative(baseDir, m.filePath);
+              }
+              return parsed;
+            }
+
+            // Fallback: fs-based search
+            const fMatches = await fsBasedSearch(opts);
+            for (const m of fMatches) {
+              if (isAbsolute(m.filePath)) m.filePath = relative(baseDir, m.filePath);
+            }
+            return fMatches;
+          };
+
+          // Collect matches across all paths
+          const allMatches: GrepMatch[] = [];
+          let anyError: string | null = null;
+          for (const rawP of rawPaths) {
+            try {
+              allMatches.push(...(await searchOnePath(rawP)));
+            } catch (err) {
+              anyError = err instanceof Error ? err.message : String(err);
+            }
+          }
+
+          if (allMatches.length === 0) {
+            if (anyError) return `Error during search: ${anyError}`;
+            return `No matches found for pattern: ${args.pattern}`;
+          }
+
+          if (args.filesOnly) return formatFilesOnlyResults(allMatches);
+          if (args.countOnly) return formatCountResults(allMatches);
+          return formatGrepResults(allMatches);
         },
       }),
     },

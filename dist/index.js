@@ -15645,6 +15645,16 @@ class HashlineMismatchError extends Error {
   mismatches;
   constructor(mismatches, fileLines, formatLineFn) {
     const blocks = mismatches.map((m) => {
+      if (m.outOfRange) {
+        const n = fileLines.length;
+        return [
+          `Anchor out of range: line ${m.line} does not exist (file has ${n} line(s)).`,
+          `You used ${m.line}#${m.expected}, but there is no line ${m.line} to anchor to.`,
+          "",
+          "Call hashline_read on this file and use pos/end values from the current hashline output (LINE#HASH only \u2014 never copy placeholder text from an error message)."
+        ].join(`
+`);
+      }
       const start = Math.max(1, m.line - 2);
       const end = Math.min(fileLines.length, m.line + 2);
       const contextLines = [];
@@ -15753,8 +15763,9 @@ function validateAllHashes(edits, fileLines) {
         mismatches.push({
           line: edit.posLine,
           expected: edit.posHash,
-          actual: "(out of range)",
-          content: ""
+          actual: "",
+          content: "",
+          outOfRange: true
         });
       } else {
         const actual = computeLineHash(fileLines[edit.posLine - 1], edit.posLine);
@@ -15773,8 +15784,9 @@ function validateAllHashes(edits, fileLines) {
         mismatches.push({
           line: edit.endLine,
           expected: edit.endHash,
-          actual: "(out of range)",
-          content: ""
+          actual: "",
+          content: "",
+          outOfRange: true
         });
       } else {
         const actual = computeLineHash(fileLines[edit.endLine - 1], edit.endLine);
@@ -15941,8 +15953,8 @@ function hlineref(n, content) {
 }
 var TOOL_DESCRIPTIONS = {
   hashline_read: "Read a file or directory with hashline annotations. Each line is formatted as LINE#HASH:content where HASH is a 2-character content hash. Use offset/limit for large files. For directories, returns a tree listing with line counts. Set diagnostics=true to include LSP diagnostics (errors/warnings) for the file.",
-  hashline_edit: 'Edit a file using hashline references. Operations: replace (single/range), append (after line), prepend (before line). Use "N#ID" anchors from hashline_read/hashline_grep output. Supports file creation (anchorless append), delete, and move. All hashes verified before mutation.',
-  hashline_grep: "Search files with hashline-annotated results. Returns matching lines with LINE#HASH:content format. Match lines prefixed with >. Context lines shown around matches. Results can be used directly for hashline_edit anchors."
+  hashline_edit: 'Edit a file using hashline references. Operations: replace (single/range), append (after line), prepend (before line). Use "N#ID" anchors from hashline_read/hashline_grep output. Supports file creation (anchorless append), delete, and move. All hashes verified before mutation. WARNING: Anchorless append (no pos) on EXISTING files appends to the end \u2014 it does NOT replace content. Use replace with anchors for idempotent rewrites.',
+  hashline_grep: "Search files with hashline-annotated results. Returns matching lines with LINE#HASH:content format. Match lines prefixed with >. Context lines shown around matches. Results can be used directly for hashline_edit anchors. Parameters: ignoreCase (bool, case-insensitive match), filesOnly (bool, return file paths only), invertMatch (bool, return non-matching lines), countOnly (bool, return match counts per file), path (string or string[] for multi-path search)."
 };
 function renderHashlineEditPrompt(lspDiagnosticsEnabled = false) {
   const e = EXAMPLE;
@@ -16008,6 +16020,7 @@ Each edit in the \`edits\` array has:
 ## File Operations
 
 - **Create new file**: Use anchorless append (no \`pos\`) on a non-existent path \u2014 the file will be created automatically.
+- **Caution**: Anchorless append on an **existing** file appends to the end \u2014 it does NOT overwrite. For idempotent rewrites, read the file first and use \`replace\` with anchors.
 - **Delete file**: \`{ path: "src/old.ts", delete: true }\`
 - **Move/rename file**: \`{ path: "src/old.ts", move: "src/new.ts" }\`
 </operations>
@@ -16803,7 +16816,16 @@ function resolvePath(filePath, contextDirectory) {
 function getBaseDir(context) {
   return context.directory || context.worktree;
 }
-var LSP_DIAGNOSTICS_ENABLED = process.env.EXPERIMENTAL_LSP_DIAGNOSTICS === "true";
+var LSP_DIAGNOSTICS_ENABLED = (() => {
+  const v = process.env.EXPERIMENTAL_LSP_DIAGNOSTICS;
+  if (v === undefined || v === "")
+    return true;
+  const lower = v.trim().toLowerCase();
+  if (lower === "false" || lower === "0" || lower === "off" || lower === "no") {
+    return false;
+  }
+  return true;
+})();
 var hasNotifiedMissingServers = false;
 function summarizeEdits(edits) {
   const lines = [];
@@ -16910,6 +16932,9 @@ function hasBinaryExtension(filePath) {
   const ext = filePath.slice(filePath.lastIndexOf(".")).toLowerCase();
   return BINARY_EXTENSIONS.has(ext);
 }
+function looksLikeFilePath(s) {
+  return (s.includes("/") || s.includes("\\")) && !s.includes("*") && !s.includes("?");
+}
 function parseRipgrepOutput(output) {
   const results = [];
   const lines = output.split(`
@@ -16971,6 +16996,30 @@ function formatGrepResults(matches) {
 
 `);
 }
+function formatFilesOnlyResults(matches) {
+  const seen = new Set;
+  for (const m of matches)
+    seen.add(m.filePath);
+  return [...seen].join(`
+`);
+}
+function formatCountResults(matches) {
+  const counts = new Map;
+  for (const m of matches) {
+    if (m.isMatch)
+      counts.set(m.filePath, (counts.get(m.filePath) ?? 0) + 1);
+  }
+  const lines = [];
+  let total = 0;
+  for (const [filePath, count] of counts) {
+    lines.push(`${filePath}: ${count}`);
+    total += count;
+  }
+  lines.push(`
+Total: ${total} matches in ${counts.size} files`);
+  return lines.join(`
+`);
+}
 async function* walkDirectory(dir, includePattern) {
   const entries = await readdir2(dir, { withFileTypes: true });
   for (const entry of entries) {
@@ -16990,11 +17039,22 @@ function globToRegex(pattern) {
   const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
   return new RegExp(`^${escaped}$`);
 }
-async function fsBasedSearch(pattern, searchPath, include, contextLines = 2) {
-  const regex = new RegExp(pattern);
-  const includeRe = include ? globToRegex(include) : undefined;
+async function fsBasedSearch(opts) {
+  const { pattern, searchPath, contextLines, includeGlob, ignoreCase, invertMatch } = opts;
+  const regexFlags = ignoreCase ? "i" : "";
+  const regex = new RegExp(pattern, regexFlags);
+  const includeRe = includeGlob ? globToRegex(includeGlob) : undefined;
   const allMatches = [];
-  for await (const filePath of walkDirectory(searchPath, includeRe)) {
+  let filePaths;
+  const pathStat = await stat(searchPath).catch(() => null);
+  if (pathStat?.isFile()) {
+    filePaths = async function* () {
+      yield searchPath;
+    }();
+  } else {
+    filePaths = walkDirectory(searchPath, includeRe);
+  }
+  for await (const filePath of filePaths) {
     if (hasBinaryExtension(filePath))
       continue;
     try {
@@ -17003,7 +17063,7 @@ async function fsBasedSearch(pattern, searchPath, include, contextLines = 2) {
 `);
       const matchIndices = [];
       for (let i = 0;i < lines.length; i++) {
-        if (regex.test(lines[i])) {
+        if (invertMatch ? !regex.test(lines[i]) : regex.test(lines[i])) {
           matchIndices.push(i);
         }
       }
@@ -17029,8 +17089,40 @@ async function fsBasedSearch(pattern, searchPath, include, contextLines = 2) {
   }
   return allMatches;
 }
+async function runRipgrep(opts) {
+  const { pattern, searchPath, contextLines, includeGlob, ignoreCase, filesOnly, invertMatch, countOnly } = opts;
+  const argv = [
+    "rg",
+    "--line-number",
+    "--with-filename",
+    "--color=never",
+    "--max-columns=0"
+  ];
+  if (!filesOnly && !countOnly)
+    argv.push(`-C${contextLines}`);
+  if (ignoreCase)
+    argv.push("--ignore-case");
+  if (filesOnly)
+    argv.push("--files-with-matches");
+  if (invertMatch)
+    argv.push("--invert-match");
+  if (countOnly)
+    argv.push("--count");
+  if (includeGlob)
+    argv.push("--glob", includeGlob);
+  argv.push("-e", pattern, "--", searchPath);
+  try {
+    const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" });
+    const stdout = await new Response(proc.stdout).text();
+    const exit = await proc.exited;
+    if (exit === 2)
+      return null;
+    return stdout;
+  } catch {
+    return null;
+  }
+}
 var plugin = async (ctx) => {
-  const { $: $2 } = ctx;
   if (LSP_DIAGNOSTICS_ENABLED) {
     const baseDir = ctx.directory || ctx.worktree;
     try {
@@ -17223,54 +17315,108 @@ ${warnings.join(`
           pattern: tool.schema.string().describe("Search pattern (regex)"),
           path: tool.schema.string().optional().describe("Directory or file to search (default: project root)"),
           include: tool.schema.string().optional().describe('File pattern filter (e.g. "*.ts")'),
-          context: tool.schema.number().optional().describe("Number of context lines around matches (default 2)")
+          context: tool.schema.number().optional().describe("Number of context lines around matches (default 2)"),
+          ignoreCase: tool.schema.boolean().optional().describe("Case-insensitive matching (default: false)"),
+          filesOnly: tool.schema.boolean().optional().describe("Return only file paths with matches, no line content (default: false)"),
+          invertMatch: tool.schema.boolean().optional().describe("Return non-matching lines, like grep -v (default: false)"),
+          countOnly: tool.schema.boolean().optional().describe("Return only match counts per file, like grep -c (default: false)"),
+          paths: tool.schema.array(tool.schema.string()).optional().describe("Array of paths to search (alternative to path for multi-path searches)")
         },
         async execute(args, context) {
-          const searchPath = args.path ? resolvePath(args.path, getBaseDir(context)) : getBaseDir(context);
+          const baseDir = getBaseDir(context);
+          let resolvedPath = args.path;
+          let resolvedInclude = args.include;
+          if (args.include && looksLikeFilePath(args.include)) {
+            if (args.path) {
+              return `Error: The \`include\` parameter expects a glob pattern (e.g. "*.ts"), not a file path. ` + `Use the \`path\` parameter to specify a file path. Both \`include\` and \`path\` were provided.`;
+            }
+            resolvedPath = args.include;
+            resolvedInclude = undefined;
+          }
           const contextLines = args.context ?? 2;
           const normalizedPattern = args.pattern.replace(/\\\|/g, "|");
-          try {
-            const rgArgs = [
-              "--line-number",
-              "--with-filename",
-              `-C${contextLines}`,
-              "--color=never"
-            ];
-            if (args.include) {
-              rgArgs.push("--glob", args.include);
-            }
-            const result = await $2`rg ${rgArgs} ${normalizedPattern} ${searchPath}`.nothrow().quiet().text();
-            if (result.trim().length === 0) {
-              return `No matches found for pattern: ${args.pattern}`;
-            }
-            const matches = parseRipgrepOutput(result);
-            if (matches.length === 0) {
-              return `No matches found for pattern: ${args.pattern}`;
-            }
-            for (const m of matches) {
-              if (isAbsolute2(m.filePath)) {
-                m.filePath = relative2(getBaseDir(context), m.filePath);
-              }
-            }
-            return formatGrepResults(matches);
-          } catch {}
-          try {
-            const matches = await fsBasedSearch(normalizedPattern, searchPath, args.include, contextLines);
-            if (matches.length === 0) {
-              return `No matches found for pattern: ${args.pattern}`;
-            }
-            for (const m of matches) {
-              if (isAbsolute2(m.filePath)) {
-                m.filePath = relative2(getBaseDir(context), m.filePath);
-              }
-            }
-            return formatGrepResults(matches);
-          } catch (err) {
-            if (err instanceof Error) {
-              return `Error during search: ${err.message}`;
-            }
-            return `Error during search for pattern: ${args.pattern}`;
+          if (args.filesOnly && args.countOnly) {
+            return "Error: `filesOnly` and `countOnly` cannot both be true.";
           }
+          const baseGrepOpts = {
+            pattern: normalizedPattern,
+            contextLines,
+            includeGlob: resolvedInclude,
+            ignoreCase: args.ignoreCase ?? false,
+            filesOnly: args.filesOnly ?? false,
+            invertMatch: args.invertMatch ?? false,
+            countOnly: args.countOnly ?? false
+          };
+          const rawPaths = [];
+          if (args.paths && args.paths.length > 0) {
+            rawPaths.push(...args.paths);
+          } else {
+            rawPaths.push(resolvedPath ?? "");
+          }
+          const searchOnePath = async (rawP) => {
+            const sp = rawP ? resolvePath(rawP, baseDir) : baseDir;
+            const opts = { ...baseGrepOpts, searchPath: sp };
+            const rgOut = await runRipgrep(opts);
+            if (rgOut !== null) {
+              if (rgOut.trim().length === 0)
+                return [];
+              if (opts.filesOnly) {
+                return rgOut.split(`
+`).filter(Boolean).map((p) => ({
+                  filePath: isAbsolute2(p) ? relative2(baseDir, p) : p,
+                  lineNumber: 0,
+                  isMatch: true,
+                  content: ""
+                }));
+              }
+              if (opts.countOnly) {
+                const result = [];
+                for (const line of rgOut.split(`
+`)) {
+                  const m = line.match(/^(.+?):(\d+)$/);
+                  if (m) {
+                    const fp = isAbsolute2(m[1]) ? relative2(baseDir, m[1]) : m[1];
+                    const n = parseInt(m[2], 10);
+                    for (let i = 0;i < n; i++) {
+                      result.push({ filePath: fp, lineNumber: i + 1, isMatch: true, content: "" });
+                    }
+                  }
+                }
+                return result;
+              }
+              const parsed = parseRipgrepOutput(rgOut);
+              for (const m of parsed) {
+                if (isAbsolute2(m.filePath))
+                  m.filePath = relative2(baseDir, m.filePath);
+              }
+              return parsed;
+            }
+            const fMatches = await fsBasedSearch(opts);
+            for (const m of fMatches) {
+              if (isAbsolute2(m.filePath))
+                m.filePath = relative2(baseDir, m.filePath);
+            }
+            return fMatches;
+          };
+          const allMatches = [];
+          let anyError = null;
+          for (const rawP of rawPaths) {
+            try {
+              allMatches.push(...await searchOnePath(rawP));
+            } catch (err) {
+              anyError = err instanceof Error ? err.message : String(err);
+            }
+          }
+          if (allMatches.length === 0) {
+            if (anyError)
+              return `Error during search: ${anyError}`;
+            return `No matches found for pattern: ${args.pattern}`;
+          }
+          if (args.filesOnly)
+            return formatFilesOnlyResults(allMatches);
+          if (args.countOnly)
+            return formatCountResults(allMatches);
+          return formatGrepResults(allMatches);
         }
       })
     },
@@ -17284,5 +17430,5 @@ export {
   src_default as default
 };
 
-//# debugId=8DA29C21244F377864756E2164756E21
+//# debugId=95889852268AE06564756E2164756E21
 //# sourceMappingURL=index.js.map

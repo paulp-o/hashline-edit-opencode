@@ -3,6 +3,8 @@ export interface MismatchInfo {
     expected: string;
     actual: string;
     content: string;
+    /** True when `line` is not in the file (e.g. empty file but anchor line 1). */
+    outOfRange?: boolean;
 }
 export declare class HashlineMismatchError extends Error {
     readonly mismatches: MismatchInfo[];

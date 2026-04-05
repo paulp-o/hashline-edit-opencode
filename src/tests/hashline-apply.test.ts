@@ -200,6 +200,22 @@ describe("applyHashlineEdits — hash mismatch", () => {
     const result = (await Bun.file(testFile).text()).split("\n");
     expect(result).toEqual(["line1", "line2", "line3"]);
   });
+
+  it("12.17 out-of-range anchor does not suggest invalid pos like 1#(out of range)", async () => {
+    await writeFile(testFile, "");
+    try {
+      await applyHashlineEdits(testFile, [
+        { op: "replace", pos: "1#KM", lines: ["x"] },
+      ]);
+      expect(true).toBe(false);
+    } catch (e) {
+      expect(e).toBeInstanceOf(HashlineMismatchError);
+      const msg = (e as Error).message;
+      expect(msg).toContain("Anchor out of range");
+      expect(msg).not.toContain("1#(out of range)");
+      expect(msg).not.toContain('pos: "1#(out of range)"');
+    }
+  });
 });
 
 // ─── Bottom-up, Dedup, No-op Tests ──────────────────────────────────────────

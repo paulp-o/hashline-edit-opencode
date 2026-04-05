@@ -65,9 +65,9 @@ export const TOOL_DESCRIPTIONS = {
   hashline_read:
     "Read a file or directory with hashline annotations. Each line is formatted as LINE#HASH:content where HASH is a 2-character content hash. Use offset/limit for large files. For directories, returns a tree listing with line counts. Set diagnostics=true to include LSP diagnostics (errors/warnings) for the file.",
   hashline_edit:
-    "Edit a file using hashline references. Operations: replace (single/range), append (after line), prepend (before line). Use \"N#ID\" anchors from hashline_read/hashline_grep output. Supports file creation (anchorless append), delete, and move. All hashes verified before mutation.",
+    "Edit a file using hashline references. Operations: replace (single/range), append (after line), prepend (before line). Use \"N#ID\" anchors from hashline_read/hashline_grep output. Supports file creation (anchorless append), delete, and move. All hashes verified before mutation. WARNING: Anchorless append (no pos) on EXISTING files appends to the end — it does NOT replace content. Use replace with anchors for idempotent rewrites.",
   hashline_grep:
-    "Search files with hashline-annotated results. Returns matching lines with LINE#HASH:content format. Match lines prefixed with >. Context lines shown around matches. Results can be used directly for hashline_edit anchors.",
+    "Search files with hashline-annotated results. Returns matching lines with LINE#HASH:content format. Match lines prefixed with >. Context lines shown around matches. Results can be used directly for hashline_edit anchors. Parameters: ignoreCase (bool, case-insensitive match), filesOnly (bool, return file paths only), invertMatch (bool, return non-matching lines), countOnly (bool, return match counts per file), path (string or string[] for multi-path search)."
 };
 
 // ─── Main Prompt ─────────────────────────────────────────────────────────────
@@ -147,6 +147,7 @@ Each edit in the \`edits\` array has:
 ## File Operations
 
 - **Create new file**: Use anchorless append (no \`pos\`) on a non-existent path — the file will be created automatically.
+- **Caution**: Anchorless append on an **existing** file appends to the end — it does NOT overwrite. For idempotent rewrites, read the file first and use \`replace\` with anchors.
 - **Delete file**: \`{ path: "src/old.ts", delete: true }\`
 - **Move/rename file**: \`{ path: "src/old.ts", move: "src/new.ts" }\`
 </operations>

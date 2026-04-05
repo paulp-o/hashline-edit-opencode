@@ -151,8 +151,9 @@ export function validateAllHashes(
         mismatches.push({
           line: edit.posLine,
           expected: edit.posHash,
-          actual: "(out of range)",
+          actual: "",
           content: "",
+          outOfRange: true,
         });
       } else {
         const actual = computeLineHash(fileLines[edit.posLine - 1], edit.posLine);
@@ -173,8 +174,9 @@ export function validateAllHashes(
         mismatches.push({
           line: edit.endLine,
           expected: edit.endHash,
-          actual: "(out of range)",
+          actual: "",
           content: "",
+          outOfRange: true,
         });
       } else {
         const actual = computeLineHash(fileLines[edit.endLine - 1], edit.endLine);

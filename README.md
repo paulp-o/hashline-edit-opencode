@@ -209,14 +209,15 @@ Edit operations: `replace`, `append`, `prepend`. Plus file operations.
 
 ## 🩺 LSP Diagnostics (Experimental)
 
-Enable automatic diagnostics after every edit:
+Diagnostics after edits are **on by default**. To disable:
+
 ```bash
-export EXPERIMENTAL_LSP_DIAGNOSTICS=true
+export EXPERIMENTAL_LSP_DIAGNOSTICS=false
 ```
 
 Language servers are **not** started during OpenCode startup (only detected from your project and PATH); they connect **lazily** the first time diagnostics are needed, so the UI is not blocked on a hung or slow LSP `initialize`.
 
-When enabled, `hashline_edit` automatically:
+When diagnostics are enabled, `hashline_edit` automatically:
 1. Spawns LSP servers configured in `opencode.json`
 2. Sends the file to the LSP after each edit
 3. Collects and formats diagnostics
@@ -265,7 +266,7 @@ The AI sees errors immediately and can fix them in the next edit.
 
 | Variable | Description | Default |
 |:---------|:------------|:-------:|
-| `EXPERIMENTAL_LSP_DIAGNOSTICS` | Enable LSP diagnostics after edits | `false` |
+| `EXPERIMENTAL_LSP_DIAGNOSTICS` | LSP diagnostics after edits (`false` / `0` / `off` to disable) | `true` |
 
 ---
 
